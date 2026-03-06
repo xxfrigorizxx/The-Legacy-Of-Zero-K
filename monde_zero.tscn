@@ -64,8 +64,36 @@ adjustment_contrast = 1.25
 script = ExtResource("3_monde")
 RenderDistance = 9
 MaxChunksParFrame = 6
-FuseauHoraireHeures = -10.0
+FuseauHoraireHeures = -15.0
 MaterielTerrain = ExtResource("14_manteau")
+
+[node name="HUD_Inventaire" type="CanvasLayer" parent="Gestionnaire_Monde"]
+
+[node name="Conteneur_Ancrage" type="MarginContainer" parent="Gestionnaire_Monde/HUD_Inventaire"]
+layout_mode = 3
+anchors_preset = 7
+anchor_left = 0.5
+anchor_top = 1.0
+anchor_right = 0.5
+anchor_bottom = 1.0
+offset_left = -69.0
+offset_top = -84.0
+offset_right = 69.0
+offset_bottom = -20.0
+theme_override_constants/margin_bottom = 20
+
+[node name="Boite_Slots" type="HBoxContainer" parent="Gestionnaire_Monde/HUD_Inventaire/Conteneur_Ancrage"]
+layout_mode = 2
+theme_override_constants/separation = 10
+alignment = 1
+
+[node name="Slot_Main_Gauche" type="Panel" parent="Gestionnaire_Monde/HUD_Inventaire/Conteneur_Ancrage/Boite_Slots"]
+custom_minimum_size = Vector2(64, 64)
+layout_mode = 2
+
+[node name="Slot_Main_Droite" type="Panel" parent="Gestionnaire_Monde/HUD_Inventaire/Conteneur_Ancrage/Boite_Slots"]
+custom_minimum_size = Vector2(64, 64)
+layout_mode = 2
 
 [node name="Joueur" type="CharacterBody3D" parent="." unique_id=1921582354]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8, 170, -8)

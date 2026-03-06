@@ -26,11 +26,22 @@ public partial class Monde_Client : Node3D
 
 	private Action<Vector2I> _enregistrerDemandeChunk;
 	private Action<Vector3, float> _demanderDestruction;
-	private Action<Vector3, Vector3, float> _demanderCreation;
+	private Action<Vector3, Vector3, float, int> _demanderCreation;
 	private int _seedTerrain;
 
+	// Références vers l'UI
+	private Panel _slotGauche;
+	private Panel _slotDroite;
+
+	public override void _Ready()
+	{
+		// Assure-toi que les chemins correspondent à ton arborescence exacte
+		_slotGauche = GetNode<Panel>("../HUD_Inventaire/Conteneur_Ancrage/Boite_Slots/Slot_Main_Gauche");
+		_slotDroite = GetNode<Panel>("../HUD_Inventaire/Conteneur_Ancrage/Boite_Slots/Slot_Main_Droite");
+	}
+
 	public void Initialiser(CharacterBody3D joueur, int seed, Action<Vector2I> enregistrerDemandeChunk,
-		Action<Vector3, float> demanderDestruction, Action<Vector3, Vector3, float> demanderCreation)
+		Action<Vector3, float> demanderDestruction, Action<Vector3, Vector3, float, int> demanderCreation)
 	{
 		_joueur = joueur;
 		_seedTerrain = seed;
@@ -208,10 +219,9 @@ public partial class Monde_Client : Node3D
 		_demanderDestruction?.Invoke(pointImpact, rayon);
 	}
 
-	public void AppliquerCreationGlobale(Vector3 pointImpact, Vector3 normale, float rayon)
+	public void AppliquerCreationGlobale(Vector3 pointImpact, Vector3 normale, float rayon, int idMatiere = 1)
 	{
-		Vector3 pointCible = pointImpact + (normale * 1.5f);
-		_demanderCreation?.Invoke(pointImpact, normale, rayon);
+		_demanderCreation?.Invoke(pointImpact, normale, rayon, idMatiere);
 	}
 
 	/// <summary>Mise à jour flore seule — N'appelle JAMAIS ConstruireMeshSection (évite recréation terrain).</summary>

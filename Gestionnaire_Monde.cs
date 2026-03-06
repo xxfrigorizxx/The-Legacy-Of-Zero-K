@@ -210,7 +210,7 @@ public partial class Gestionnaire_Monde : Node3D
 			SeedTerrain,
 			coord => _mondeServeur.EnregistrerDemandeChunk(coord),
 			(pointImpact, rayon) => _mondeServeur.AppliquerDestructionGlobale(pointImpact, rayon),
-			(pointImpact, normale, rayon) => _mondeServeur.AppliquerCreationGlobale(pointImpact, normale, rayon)
+			(pointImpact, normale, rayon, idMatiere) => _mondeServeur.AppliquerCreationGlobale(pointImpact, normale, rayon, idMatiere)
 		);
 
 		_mondeServeur.Initialiser(
@@ -370,19 +370,50 @@ public partial class Gestionnaire_Monde : Node3D
 		}
 	}
 
-	public void AppliquerCreationGlobale(Vector3 pointImpact, Vector3 normale, float rayon)
+	public void AppliquerCreationGlobale(Vector3 pointImpact, Vector3 normale, float rayon, int idMatiere = 1)
 	{
 		if (UseArchitectureReseau)
-			_mondeClient?.AppliquerCreationGlobale(pointImpact, normale, rayon);
+			_mondeClient?.AppliquerCreationGlobale(pointImpact, normale, rayon, idMatiere);
 		else
 		{
 			Vector3 cible = pointImpact + (normale * 1.5f);
 			foreach (var kv in _chunks)
 			{
 				var g = kv.Value as Generateur_Voxel;
-				g?.CreerMatiere(cible, rayon);
+				g?.CreerMatiere(cible, rayon, idMatiere);
 			}
 		}
+	}
+
+	/// <summary>Oracle géologique : lecture directe de l'ADN (_materials) depuis le Serveur. Évite la dissonance visuelle (mine terre → reçoit pierre).</summary>
+	public int ObtenirMatiereExacte(Vector3 positionGlobale)
+	{
+		if (UseArchitectureReseau && _mondeServeur != null)
+			return _mondeServeur.ObtenirMatiereExacte(positionGlobale);
+		return AnalyserMatiereAuPoint(positionGlobale, Vector3.Up); // Fallback legacy
+	}
+
+	/// <summary>Oracle géologique (legacy) : déduit l'ID depuis altitude/normale. Utiliser ObtenirMatiereExacte en mode réseau.</summary>
+	public int AnalyserMatiereAuPoint(Vector3 positionGlobale, Vector3 normaleSurface)
+	{
+		float altitude = positionGlobale.Y;
+
+		// Règle 1 : La pente absolue (La Roche) — mur vertical ou falaise
+		if (normaleSurface.Y < 0.6f)
+			return 2; // ID 2 = Roche
+
+		// Règle 2 : Le niveau de la mer (Le Sable)
+		const float NIVEAU_EAU = 102f; // Aligné avec NiveauPlage du terrain
+		if (altitude < NIVEAU_EAU + 2.0f && altitude >= NIVEAU_EAU - 5.0f)
+			return 3; // ID 3 = Sable
+
+		// Règle 3 : Les hauts sommets (La Neige)
+		const float NIVEAU_NEIGE = 200f;
+		if (altitude > NIVEAU_NEIGE)
+			return 4; // ID 4 = Neige
+
+		// Par défaut : plat et altitude moyenne
+		return 1; // ID 1 = Terre
 	}
 
 	// --- Legacy ---

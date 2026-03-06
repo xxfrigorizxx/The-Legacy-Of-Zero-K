@@ -281,6 +281,7 @@ public partial class Chunk_Client : Node3D
 		return _sectionsPhysiques[section]?.Shape != null;
 	}
 
+	/// <summary>Applique le mesh visuel ET le CollisionShape3D (CRITIQUE : sans ça, le terrain posé serait indestructible).</summary>
 	private void AppliquerMeshSection(int idx, ArrayMesh meshTerrain, ArrayMesh meshEau)
 	{
 		try
@@ -289,18 +290,24 @@ public partial class Chunk_Client : Node3D
 			_sectionsTerrain[idx].Mesh = meshTerrain;
 			_sectionsTerrain[idx].MaterialOverride = MaterielTerre ?? GD.Load<Material>("res://Manteau_Planetaire.tres");
 
+			// ANNIHILATION DU FANTÔME PHYSIQUE : recalcul OBLIGATOIRE de la collision après chaque modification de densité.
+			// CreateTrimeshShape génère un ConcavePolygonShape3D pour le terrain complexe. Sans ça, le RayCast passe au travers.
 			var collisionShape = _sectionsPhysiques[idx];
-			if (collisionShape.Shape != null)
+			if (collisionShape != null)
 			{
-				collisionShape.Shape.Dispose();
-			}
-			if (meshTerrain != null && meshTerrain.GetFaces().Length > 0)
-			{
-				collisionShape.Shape = meshTerrain.CreateTrimeshShape();
-			}
-			else
-			{
-				collisionShape.Shape = null;
+				Shape3D nouveauShape = (meshTerrain != null && meshTerrain.GetFaces().Length > 0)
+					? meshTerrain.CreateTrimeshShape()
+					: null;
+				Callable.From(() =>
+				{
+					if (!IsInsideTree() || collisionShape == null) return;
+					if (collisionShape.Shape != null)
+					{
+						collisionShape.Shape.Dispose();
+						collisionShape.Shape = null;
+					}
+					collisionShape.Shape = nouveauShape;
+				}).CallDeferred();
 			}
 
 			if (_densitiesEau != null && meshEau != null)
@@ -346,7 +353,7 @@ public partial class Chunk_Client : Node3D
 		Vector3 chunkOrigin = GlobalPosition;
 		var pleins = new List<Transform3D>();
 		var vides = new List<Transform3D>();
-		var gazonTransforms = new List<Transform3D>();
+		var gazonInstances = new List<(Transform3D t, Color c)>();
 
 		Vector3 posObs = (GetParent() as Monde_Client)?.ObtenirPositionObservation() ?? chunkOrigin;
 		float rayonCarre = (RAYON_GAZON_CHUNKS * TailleChunk) * (RAYON_GAZON_CHUNKS * TailleChunk);
@@ -364,7 +371,9 @@ public partial class Chunk_Client : Node3D
 				var tGazon = Transform3D.Identity;
 				tGazon.Origin = positionLocale;
 				tGazon.Basis = Basis.Identity.Scaled(new Vector3(EchelleGazon, EchelleGazon, EchelleGazon)).Rotated(Vector3.Up, angle);
-				gazonTransforms.Add(tGazon);
+				Color couleurSol = ObtenirCouleurTerrainApprox(kv.Key.X, kv.Key.Y, kv.Key.Z);
+				Color couleurHerbe = new Color(couleurSol.R * 0.8f, couleurSol.G * 0.8f, couleurSol.B * 0.8f, 1f).Lerp(new Color(0.7f, 0.8f, 1f), 0.1f);
+				gazonInstances.Add((tGazon, couleurHerbe));
 			}
 
 			// Buissons : échelle déterministe (évite "grossissement" à chaque rafraîchissement)
@@ -380,17 +389,22 @@ public partial class Chunk_Client : Node3D
 			}
 		}
 		Mesh meshGazon = ChargerMeshFlore("res://Modeles/Botanique/grass.glb");
-		if (meshGazon == null && gazonTransforms.Count > 0)
+		if (meshGazon == null && gazonInstances.Count > 0)
 			meshGazon = CreerMeshGazonFallback();
-		if (meshGazon != null && gazonTransforms.Count > 0)
+		if (meshGazon != null && gazonInstances.Count > 0)
 		{
 			var mm = new MultiMesh();
 			mm.TransformFormat = MultiMesh.TransformFormatEnum.Transform3D;
+			mm.UseColors = true;
 			mm.Mesh = meshGazon;
-			mm.InstanceCount = gazonTransforms.Count;
-			for (int i = 0; i < gazonTransforms.Count; i++) mm.SetInstanceTransform(i, gazonTransforms[i]);
+			mm.InstanceCount = gazonInstances.Count;
+			for (int i = 0; i < gazonInstances.Count; i++)
+			{
+				mm.SetInstanceTransform(i, gazonInstances[i].t);
+				mm.SetInstanceColor(i, gazonInstances[i].c);
+			}
 			_mmGazon.Multimesh = mm;
-			_mmGazon.MaterialOverride = ObtenirMaterielGazonAssombri();
+			_mmGazon.MaterialOverride = ObtenirMaterielGazonSymbiotique();
 			_mmGazon.Visible = true;
 		}
 		else
@@ -427,6 +441,51 @@ public partial class Chunk_Client : Node3D
 	private static Mesh _cacheMeshPlein;
 	private static Mesh _cacheMeshVide;
 	private static Material _cacheMaterielGazonAssombri;
+	private static Material _cacheMaterielGazonSymbiotique;
+
+	/// <summary>Couleur approximative du terrain à (x,y,z) — même formule que TerrainVoxel (temp/hum). Pour herbe symbiotique.</summary>
+	private Color ObtenirCouleurTerrainApprox(int xGlobal, int yGlobal, int zGlobal)
+	{
+		if (_materials == null || _noiseTemperature == null || _noiseHumidite == null) return new Color(0.5f, 0.6f, 0.5f);
+		int lx = xGlobal - ChunkOffsetX * TailleChunk;
+		int lz = zGlobal - ChunkOffsetZ * TailleChunk;
+		if (lx < 0 || lx > TailleChunk || yGlobal < 0 || yGlobal > HauteurMax || lz < 0 || lz > TailleChunk)
+			return new Color(0.5f, 0.6f, 0.5f);
+		byte idMat = _materials[lx, yGlobal, lz];
+		float temp = _noiseTemperature.GetNoise2D(xGlobal, zGlobal);
+		float hum = _noiseHumidite.GetNoise2D(xGlobal, zGlobal);
+		float facteurHum = Mathf.Clamp((hum + 1f) * 0.5f, 0f, 1f);
+		float accentue = facteurHum < 0.2f ? 0f : (facteurHum > 0.8f ? 1f : (facteurHum - 0.2f) / 0.6f);
+		Color sec = new Color(1.5f, 0.85f, 0.25f);
+		Color humide = new Color(0.35f, 1.15f, 0.45f);
+		Color couleurBase = sec.Lerp(humide, accentue);
+		return couleurBase;
+	}
+
+	/// <summary>ShaderMaterial symbiotique : albedo * COLOR (instance). Pour herbe qui épouse le sol givré.</summary>
+	private static Material ObtenirMaterielGazonSymbiotique()
+	{
+		if (_cacheMaterielGazonSymbiotique != null) return _cacheMaterielGazonSymbiotique;
+		var shader = GD.Load<Shader>("res://textures/Shader_Herbe.gdshader");
+		if (shader == null) return ObtenirMaterielGazonAssombri();
+		var mat = new ShaderMaterial();
+		mat.Shader = shader;
+		Texture2D texAlbedo = ExtraireTextureAlbedoDepuisGrass() ?? GD.Load<Texture2D>("res://textures/terrain/01_herbe.jpg");
+		if (texAlbedo != null) mat.SetShaderParameter("albedo_texture", texAlbedo);
+		_cacheMaterielGazonSymbiotique = mat;
+		return mat;
+	}
+
+	private static Texture2D ExtraireTextureAlbedoDepuisGrass()
+	{
+		var scene = GD.Load<PackedScene>("res://Modeles/Botanique/grass.glb");
+		if (scene == null) return null;
+		Node racine = scene.Instantiate();
+		Material m = TrouverMaterielSurMeshInstance(racine);
+		racine.QueueFree();
+		if (m is StandardMaterial3D s && s.AlbedoTexture != null) return s.AlbedoTexture;
+		return null;
+	}
 
 	private static Material ObtenirMaterielGazonAssombri()
 	{

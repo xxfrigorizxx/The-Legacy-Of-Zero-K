@@ -234,16 +234,22 @@ public partial class Chunk_Serveur : RefCounted
 		return ((h % 10000) / 10000f);
 	}
 
-	/// <summary>Vrai si le terrain est assez plat pour la flore (évite modèles 3D sur pentes). Utilise la génération procédurale.</summary>
+	/// <summary>Seuil de pente max (m) : si la hauteur varie de plus sur 1 m, pas de flore (évite lévitation sur bords).</summary>
+	private const float SEUIL_PENTE_MAX = 0.8f;
+
+	/// <summary>Loi de l'inclinaison : vrai si le terrain est assez plat pour la flore. Évalue la pente via différence de hauteur du bruit.</summary>
 	private bool TerrainAssezPlat(int xGlobal, int zGlobal)
 	{
-		int h0 = CalculerHauteurTerrain(xGlobal, zGlobal);
-		int hx1 = CalculerHauteurTerrain(xGlobal + 1, zGlobal);
-		int hx2 = CalculerHauteurTerrain(xGlobal - 1, zGlobal);
-		int hz1 = CalculerHauteurTerrain(xGlobal, zGlobal + 1);
-		int hz2 = CalculerHauteurTerrain(xGlobal, zGlobal - 1);
-		int maxDiff = Mathf.Max(Mathf.Max(Mathf.Abs(hx1 - h0), Mathf.Abs(hx2 - h0)), Mathf.Max(Mathf.Abs(hz1 - h0), Mathf.Abs(hz2 - h0)));
-		return maxDiff <= 1;
+		float h0 = CalculerHauteurTerrain(xGlobal, zGlobal);
+		float hauteurNord = CalculerHauteurTerrain(xGlobal, zGlobal + 1);
+		float hauteurSud = CalculerHauteurTerrain(xGlobal, zGlobal - 1);
+		float hauteurEst = CalculerHauteurTerrain(xGlobal + 1, zGlobal);
+		float hauteurOuest = CalculerHauteurTerrain(xGlobal - 1, zGlobal);
+		float diffMax = Mathf.Max(
+			Mathf.Max(Mathf.Abs(hauteurNord - h0), Mathf.Abs(hauteurSud - h0)),
+			Mathf.Max(Mathf.Abs(hauteurEst - h0), Mathf.Abs(hauteurOuest - h0))
+		);
+		return diffMax < SEUIL_PENTE_MAX;
 	}
 
 	/// <summary>Hauteur de surface depuis les données chargées (chunks disque). -1 si hors limites ou pas de sol.</summary>
@@ -256,7 +262,7 @@ public partial class Chunk_Serveur : RefCounted
 		return -1;
 	}
 
-	/// <summary>Vrai si le terrain chargé est assez plat à (lx, lz). Pour chunks depuis disque.</summary>
+	/// <summary>Loi de l'inclinaison (chunks disque) : vrai si le terrain chargé est assez plat à (lx, lz).</summary>
 	private bool TerrainAssezPlatDepuisDonnees(int lx, int lz)
 	{
 		int h0 = ObtenirHauteurSurfaceLocale(lx, lz);
@@ -265,12 +271,12 @@ public partial class Chunk_Serveur : RefCounted
 		int hx2 = ObtenirHauteurSurfaceLocale(lx - 1, lz);
 		int hz1 = ObtenirHauteurSurfaceLocale(lx, lz + 1);
 		int hz2 = ObtenirHauteurSurfaceLocale(lx, lz - 1);
-		int d1 = hx1 >= 0 ? Mathf.Abs(hx1 - h0) : 0;
-		int d2 = hx2 >= 0 ? Mathf.Abs(hx2 - h0) : 0;
-		int d3 = hz1 >= 0 ? Mathf.Abs(hz1 - h0) : 0;
-		int d4 = hz2 >= 0 ? Mathf.Abs(hz2 - h0) : 0;
-		int maxDiff = Mathf.Max(Mathf.Max(d1, d2), Mathf.Max(d3, d4));
-		return maxDiff <= 1;
+		float d1 = hx1 >= 0 ? Mathf.Abs(hx1 - h0) : 0f;
+		float d2 = hx2 >= 0 ? Mathf.Abs(hx2 - h0) : 0f;
+		float d3 = hz1 >= 0 ? Mathf.Abs(hz1 - h0) : 0f;
+		float d4 = hz2 >= 0 ? Mathf.Abs(hz2 - h0) : 0f;
+		float diffMax = Mathf.Max(Mathf.Max(d1, d2), Mathf.Max(d3, d4));
+		return diffMax < SEUIL_PENTE_MAX;
 	}
 
 	private byte DeterminerMateriauCroûte(int globalY, int hauteurSurface, float temperature, float humidite)
@@ -425,12 +431,13 @@ public partial class Chunk_Serveur : RefCounted
 		Vector3 pointLocal = pointImpactGlobal - PositionMonde;
 		var positionsDetruites = new List<Vector3I>();
 
-		// Crible préventif : flore dans la zone d'impact (distance < 1.5) — déraciner AVANT de modifier la densité
+		// Destruction radiale : flore dans le rayon de la pioche (2 m) — atomiser AVANT de modifier la densité
+		const float rayonDestructionFlore = 2.0f;
 		var floreDetruite = new List<KeyValuePair<Vector3I, byte>>();
 		foreach (var kv in InventaireFlore)
 		{
 			Vector3 posFlore = new Vector3(kv.Key.X + 0.5f, kv.Key.Y + 0.5f, kv.Key.Z + 0.5f);
-			if (posFlore.DistanceTo(pointImpactGlobal) < 1.5f) floreDetruite.Add(kv);
+			if (posFlore.DistanceTo(pointImpactGlobal) <= rayonDestructionFlore) floreDetruite.Add(kv);
 		}
 		foreach (var kv in floreDetruite)
 		{
@@ -463,7 +470,7 @@ public partial class Chunk_Serveur : RefCounted
 						if (dx * dx + dy * dy + dz * dz <= rayon2)
 						{
 							bool etaitSolide = _densities[x, y, z] > Isolevel;
-							_densities[x, y, z] -= 2.0f;
+							_densities[x, y, z] = Mathf.Max(_densities[x, y, z] - 5.0f, -1.0f); // Plancher absolu : le voxel ne peut pas être "plus que vide"
 							modifie = true;
 							if (etaitSolide) positionsDetruites.Add(new Vector3I(x, y, z));
 						}
@@ -482,7 +489,7 @@ public partial class Chunk_Serveur : RefCounted
 		AuditerGraviteFlore();
 	}
 
-	public void CreerMatiere(Vector3 pointCibleGlobal, float rayon, Action<List<int>> onSectionsAffectees = null)
+	public void CreerMatiere(Vector3 pointCibleGlobal, float rayon, byte idMatiere = 1, Action<List<int>> onSectionsAffectees = null)
 	{
 		Vector3 pointLocal = pointCibleGlobal - PositionMonde;
 		var positionsModifiees = new List<Vector3I>();
@@ -498,8 +505,8 @@ public partial class Chunk_Serveur : RefCounted
 						float dx = pointLocal.X - x, dy = pointLocal.Y - y, dz = pointLocal.Z - z;
 						if (dx * dx + dy * dy + dz * dz <= rayon2)
 						{
-							_densities[x, y, z] += 5.0f;
-							_materials[x, y, z] = 1;
+							_densities[x, y, z] = Mathf.Min(_densities[x, y, z] + 5.0f, 1.0f); // Plafond absolu : le voxel ne peut pas être "plus que plein"
+							_materials[x, y, z] = idMatiere; // Injection couleur : le Shader lit ce tableau
 							positionsModifiees.Add(new Vector3I(x, y, z));
 						}
 					}
@@ -511,7 +518,7 @@ public partial class Chunk_Serveur : RefCounted
 		{
 			_reveillerEau?.Invoke(PositionMonde + new Vector3(pos.X, pos.Y, pos.Z));
 			var posGlobal = new Vector3I((int)PositionMonde.X + pos.X, pos.Y, (int)PositionMonde.Z + pos.Z);
-			_onVoxelModifie?.Invoke(posGlobal, 1);
+			_onVoxelModifie?.Invoke(posGlobal, idMatiere);
 		}
 		AuditerGraviteFlore();
 	}
@@ -543,6 +550,20 @@ public partial class Chunk_Serveur : RefCounted
 
 	private bool EstSolide(int x, int y, int z) =>
 		EstDansLimitesChunk(x, y, z) && _densities[x, y, z] > Isolevel;
+
+	/// <summary>Lecture directe de l'ADN : retourne l'ID matière exact du voxel (aligné avec le Shader). 1 si air ou hors limites. CÉCITÉ HYDRIQUE : jamais 4 (eau).</summary>
+	public byte ObtenirMatiereAtLocal(int lx, int ly, int lz)
+	{
+		if (!EstDansLimitesChunk(lx, ly, lz) || _densities == null) return 1;
+		lock (_verrouVoxel)
+		{
+			if (_densities[lx, ly, lz] <= Isolevel) return 1; // Air : fallback terre
+			byte mat = _materials[lx, ly, lz];
+			// L'EAU (ID 4) est un fluide géré ailleurs. Le Marching Cubes sous l'eau = SABLE ou TERRE. Jamais retourner 4.
+			if (mat == 4) return 3; // Fond marin = Sable
+			return mat;
+		}
+	}
 
 	private static int ObtenirResistanceMateriau(byte id)
 	{

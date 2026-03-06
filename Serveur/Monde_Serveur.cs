@@ -391,16 +391,16 @@ public partial class Monde_Serveur : Node
 			}
 	}
 
-	public void AppliquerCreationGlobale(Vector3 pointImpact, Vector3 normale, float rayon, int peerDemandeur = -1)
+	public void AppliquerCreationGlobale(Vector3 pointImpact, Vector3 normale, float rayon, int idMatiere = 1)
 	{
 		_modificationEnCours = true;
-		Vector3 pointCible = pointImpact + (normale * 1.5f);
+		Vector3 pointCible = pointImpact + (normale * 0.1f); // Réduit pour éviter les blocs flottants
 		int cx = Mathf.FloorToInt(pointCible.X / (float)TailleChunk);
 		int cz = Mathf.FloorToInt(pointCible.Z / (float)TailleChunk);
 		Vector2I coord = new Vector2I(cx, cz);
 
 		var chunk = ObtenirOuCreerChunk(coord);
-		chunk.CreerMatiere(pointCible, rayon);
+		chunk.CreerMatiere(pointCible, rayon, (byte)Mathf.Clamp(idMatiere, 0, 255));
 	}
 
 	public DonneesChunk ObtenirDonneesChunkPourClient(Vector2I coord)
@@ -480,6 +480,18 @@ public partial class Monde_Serveur : Node
 	public static int ObtenirHauteurTerrainMonde(int worldX, int worldZ, int seed)
 	{
 		return Generateur_Voxel.ObtenirHauteurTerrainMonde(worldX, worldZ, seed);
+	}
+
+	/// <summary>Oracle géologique : lecture directe de l'ADN (_materials) au lieu de deviner. Aligné avec le Shader.</summary>
+	public int ObtenirMatiereExacte(Vector3 positionGlobale)
+	{
+		int gx = Mathf.FloorToInt(positionGlobale.X);
+		int gy = Mathf.FloorToInt(positionGlobale.Y);
+		int gz = Mathf.FloorToInt(positionGlobale.Z);
+		var r = ObtenirChunkEtLocal(new Vector3I(gx, gy, gz));
+		if (!r.HasValue) return 1;
+		byte mat = r.Value.chunk.ObtenirMatiereAtLocal(r.Value.local.X, r.Value.local.Y, r.Value.local.Z);
+		return mat > 0 ? mat : 1;
 	}
 
 	private float DistanceCarreeAuJoueur(Vector2I chunk, Vector3 posObservation)

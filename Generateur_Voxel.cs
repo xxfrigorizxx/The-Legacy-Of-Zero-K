@@ -454,7 +454,7 @@ public partial class Generateur_Voxel : Node3D
 					if (dist2 <= rayon2)
 					{
 						bool etaitSolide = _densities[x, y, z] > Isolevel;
-						_densities[x, y, z] -= 2.0f;
+						_densities[x, y, z] = Mathf.Max(_densities[x, y, z] - 5.0f, -1.0f); // Plancher absolu
 						modifie = true;
 						if (etaitSolide)
 							positionsDetruites.Add(new Vector3I(x, y, z));
@@ -605,10 +605,11 @@ public partial class Generateur_Voxel : Node3D
 		VerifierStabilite(new Vector3I(xu, yu - 1, zu + 1));
 	}
 
-	public void CreerMatiere(Vector3 pointCibleGlobal, float rayon)
+	public void CreerMatiere(Vector3 pointCibleGlobal, float rayon, int idMatiere = 1)
 	{
 		Vector3 pointLocal = pointCibleGlobal - GlobalPosition;
 		var positionsModifiees = new System.Collections.Generic.List<Vector3I>();
+		byte mat = (byte)Mathf.Clamp(idMatiere, 0, 255);
 
 		lock (_verrouVoxel)
 		{
@@ -630,8 +631,8 @@ public partial class Generateur_Voxel : Node3D
 
 					if (dist2 <= rayon2)
 					{
-						_densities[x, y, z] += 5.0f;
-						_materials[x, y, z] = 1;
+						_densities[x, y, z] = Mathf.Min(_densities[x, y, z] + 5.0f, 1.0f); // Plafond absolu
+						_materials[x, y, z] = mat; // Injection couleur : le Shader lit ce tableau
 						modifie = true;
 						positionsModifiees.Add(new Vector3I(x, y, z));
 					}
