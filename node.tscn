@@ -1,0 +1,17 @@
+[gd_scene format=3 uid="uid://brkxvse8t666h"]
+
+[ext_resource type="Script" uid="uid://cg8j1ht1501eq" path="res://ForgeLivreTerrain.cs" id="1_jfkdj"]
+[ext_resource type="Texture2D" uid="uid://b5lioau6ob7wl" path="res://textures/terrain/00_vide.jpg" id="2_wt6go"]
+[ext_resource type="Texture2D" uid="uid://bdqoawu8ofleq" path="res://textures/terrain/01_herbe.jpg" id="3_436f3"]
+[ext_resource type="Texture2D" uid="uid://d3b3qo38iqjse" path="res://textures/terrain/02_roche.png" id="4_bcos8"]
+[ext_resource type="Texture2D" uid="uid://d134xxj244j6i" path="res://textures/terrain/03_sable.png" id="5_cmsyx"]
+[ext_resource type="Texture2D" uid="uid://caw31rv8q4uvs" path="res://textures/terrain/04_eau_fantome.jpg" id="6_feppd"]
+[ext_resource type="Texture2D" uid="uid://w7gjei5d4t1q" path="res://textures/terrain/05_neige.png" id="7_aeaoo"]
+[ext_resource type="Texture2D" uid="uid://djj7ncd06ltli" path="res://textures/terrain/06_terre_aride.png" id="8_sps8e"]
+[ext_resource type="Texture2D" uid="uid://c7l8crvuq085v" path="res://textures/terrain/07_boue.png" id="9_bnlop"]
+[ext_resource type="Texture2D" uid="uid://rdjuys2m8odv" path="res://textures/terrain/08_argile.jpg" id="10_oaeeq"]
+[ext_resource type="Texture2D" uid="uid://b3nc1q5d227vl" path="res://textures/terrain/09_glace.png" id="11_ey15c"]
+
+[node name="Node" type="Node" unique_id=1938958852]
+script = ExtResource("1_jfkdj")
+TexturesInput = [ExtResource("2_wt6go"), ExtResource("3_436f3"), ExtResource("4_bcos8"), ExtResource("5_cmsyx"), ExtResource("6_feppd"), ExtResource("7_aeaoo"), ExtResource("8_sps8e"), ExtResource("9_bnlop"), ExtResource("10_oaeeq"), ExtResource("11_ey15c")]

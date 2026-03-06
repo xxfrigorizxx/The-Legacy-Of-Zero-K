@@ -1,0 +1,8 @@
+[gd_scene format=3 uid="uid://da1omywnija0s"]
+
+[ext_resource type="Script" uid="uid://1xw5j028134l" path="res://Generateur_Voxel.cs" id="1_gen"]
+[ext_resource type="Material" uid="uid://d0kcri8yqfqre" path="res://Manteau_Planetaire.tres" id="2_dnk1h"]
+
+[node name="Generateur_Voxel" type="Node3D" unique_id=57858893]
+script = ExtResource("1_gen")
+MaterielTerre = ExtResource("2_dnk1h")

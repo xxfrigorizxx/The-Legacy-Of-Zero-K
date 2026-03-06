@@ -1,0 +1,10 @@
+[gd_resource type="ShaderMaterial" format=3 uid="uid://d0kcri8yqfqre"]
+
+[ext_resource type="Shader" uid="uid://lo66wks0i1r" path="res://TerrainVoxel.gdshader" id="1_xkswa"]
+[ext_resource type="Texture2DArray" uid="uid://ed646yn2vaiv" path="res://Livre_Terrain.tres" id="2_m8cy1"]
+
+[resource]
+render_priority = 0
+shader = ExtResource("1_xkswa")
+shader_parameter/texture_array = ExtResource("2_m8cy1")
+shader_parameter/triplanar_scale = 0.2

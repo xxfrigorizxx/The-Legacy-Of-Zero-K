@@ -1,0 +1,108 @@
+[gd_scene format=3 uid="uid://f4uwoekbjbr8"]
+
+[ext_resource type="Script" uid="uid://bd888g1yguo4a" path="res://Joueur.cs" id="2_vtxml"]
+[ext_resource type="Script" uid="uid://c1iuia40evd4j" path="res://Gestionnaire_Monde.cs" id="3_monde"]
+[ext_resource type="Script" uid="uid://cg8j1ht1501eq" path="res://ForgeLivreTerrain.cs" id="3_qcpdu"]
+[ext_resource type="Texture2D" uid="uid://b5lioau6ob7wl" path="res://textures/terrain/00_vide.jpg" id="4_k5uh1"]
+[ext_resource type="Texture2D" uid="uid://bdqoawu8ofleq" path="res://textures/terrain/01_herbe.jpg" id="5_7pjmi"]
+[ext_resource type="Texture2D" uid="uid://d3b3qo38iqjse" path="res://textures/terrain/02_roche.png" id="6_osye3"]
+[ext_resource type="Texture2D" uid="uid://d134xxj244j6i" path="res://textures/terrain/03_sable.png" id="7_xo8e4"]
+[ext_resource type="Texture2D" uid="uid://caw31rv8q4uvs" path="res://textures/terrain/04_eau_fantome.jpg" id="8_3jrio"]
+[ext_resource type="Texture2D" uid="uid://w7gjei5d4t1q" path="res://textures/terrain/05_neige.png" id="9_7e7w4"]
+[ext_resource type="Texture2D" uid="uid://djj7ncd06ltli" path="res://textures/terrain/06_terre_aride.png" id="10_neme4"]
+[ext_resource type="Texture2D" uid="uid://c7l8crvuq085v" path="res://textures/terrain/07_boue.png" id="11_8g5cw"]
+[ext_resource type="Texture2D" uid="uid://rdjuys2m8odv" path="res://textures/terrain/08_argile.jpg" id="12_ipouq"]
+[ext_resource type="Texture2D" uid="uid://b3nc1q5d227vl" path="res://textures/terrain/09_glace.png" id="13_4vd4l"]
+[ext_resource type="Material" uid="uid://d0kcri8yqfqre" path="res://Manteau_Planetaire.tres" id="14_manteau"]
+[ext_resource type="Script" uid="uid://nvpc4cn6efp6" path="res://Cycle_Solaire.cs" id="15_soleil"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_osye3"]
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_qcpdu"]
+
+[sub_resource type="Gradient" id="Gradient_osye3"]
+offsets = PackedFloat32Array(0.8907767, 1)
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_xo8e4"]
+noise_type = 2
+frequency = 0.0413
+
+[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_3jrio"]
+width = 2048
+height = 2048
+noise = SubResource("FastNoiseLite_xo8e4")
+color_ramp = SubResource("Gradient_osye3")
+seamless = true
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_osye3"]
+sky_cover = SubResource("NoiseTexture2D_3jrio")
+sun_angle_max = 29.34
+sun_curve = 0.05
+
+[sub_resource type="Sky" id="Sky_main"]
+sky_material = SubResource("ProceduralSkyMaterial_osye3")
+
+[sub_resource type="Environment" id="Environment_vtxml"]
+background_mode = 2
+sky = SubResource("Sky_main")
+fog_light_color = Color(0.1098, 0.30154327, 0.61, 1)
+fog_light_energy = 0.32
+fog_density = 0.001
+fog_sky_affect = 0.63
+fog_height = 1006.5
+fog_height_density = 16.0
+volumetric_fog_density = 0.005
+volumetric_fog_length = 42.12
+volumetric_fog_detail_spread = 1.8467175
+volumetric_fog_sky_affect = 0.189
+volumetric_fog_temporal_reprojection_enabled = false
+adjustment_contrast = 1.25
+
+[node name="Monde_Zero" type="Node3D" unique_id=1323649165]
+
+[node name="Gestionnaire_Monde" type="Node3D" parent="." unique_id=2015054098]
+script = ExtResource("3_monde")
+RenderDistance = 9
+MaxChunksParFrame = 6
+FuseauHoraireHeures = -10.0
+MaterielTerrain = ExtResource("14_manteau")
+
+[node name="Joueur" type="CharacterBody3D" parent="." unique_id=1921582354]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8, 170, -8)
+script = ExtResource("2_vtxml")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Joueur" unique_id=795850500]
+shape = SubResource("CapsuleShape3D_osye3")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Joueur" unique_id=1988828658]
+mesh = SubResource("CapsuleMesh_qcpdu")
+
+[node name="Camera3D" type="Camera3D" parent="Joueur" unique_id=1477136619]
+
+[node name="RayCast3D" type="RayCast3D" parent="Joueur/Camera3D" unique_id=676864644]
+target_position = Vector3(0, 0, -5)
+
+[node name="CycleSolaire" type="Node" parent="." unique_id=545490242]
+script = ExtResource("15_soleil")
+
+[node name="Node" type="Node" parent="." unique_id=1226969792]
+script = ExtResource("3_qcpdu")
+TexturesInput = [ExtResource("4_k5uh1"), ExtResource("5_7pjmi"), ExtResource("6_osye3"), ExtResource("7_xo8e4"), ExtResource("8_3jrio"), ExtResource("9_7e7w4"), ExtResource("10_neme4"), ExtResource("11_8g5cw"), ExtResource("12_ipouq"), ExtResource("13_4vd4l")]
+
+[node name="Soleil" type="DirectionalLight3D" parent="." unique_id=545490240]
+transform = Transform3D(0.7959773, 0.5956492, -0.10780654, 0.029654216, 0.1395121, 0.98977625, 0.6045997, -0.79103637, 0.09338495, 0, 13.034424, 0)
+light_color = Color(0.99999887, 0.99166626, 0.6266634, 1)
+light_energy = 2.355
+light_angular_distance = 2.54
+
+[node name="Lune" type="DirectionalLight3D" parent="." unique_id=545490241]
+transform = Transform3D(0.79597723, -0.5956493, -0.10780642, 0.02965417, -0.13951197, 0.98977625, -0.6045998, -0.7910363, -0.09338486, 0, 13.034426, 0)
+light_color = Color(0.7153752, 0.7887316, 1, 1)
+light_energy = 1.955
+shadow_enabled = true
+sky_mode = 1
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1714865845]
+environment = SubResource("Environment_vtxml")
+
+[connection signal="visibility_changed" from="Joueur" to="Joueur" method="_on_visibility_changed"]

@@ -1,0 +1,62 @@
+---
+description: Éradication des allocations mémoire (GC spikes) dans le chemin critique
+globs: **/*.cs
+alwaysApply: false
+---
+
+# Règle : Zéro allocation dans le chemin critique (Marching Cubes, Réseau)
+
+Le jeu subit des stutters réguliers (1–2 s) = signature de GC Spike. Éliminer les allocations dynamiques dans le chemin critique (Task.Run, génération de Chunk).
+
+## 1. Recyclage des listes (Marching Cubes)
+
+**BANNI** : `new List<Vector3>()`, `new float[8]`, `new Vector3[12]` dans les boucles fréquentes.
+
+**À FAIRE** : `[ThreadStatic]` pour réutiliser la même liste par thread, sans jamais la recréer.
+
+```csharp
+[ThreadStatic] private static float[] _valsRecyclables;
+[ThreadStatic] private static Vector3[] _vertListRecyclables;
+
+// Dans la méthode (ex: ConstruireMeshSection) :
+if (_valsRecyclables == null) _valsRecyclables = new float[8];
+if (_vertListRecyclables == null) _vertListRecyclables = new Vector3[12];
+// Puis utiliser _valsRecyclables / _vertListRecyclables, ne jamais new dans la boucle.
+```
+
+## 2. ArrayPool pour tampons temporaires
+
+Pour tout `byte[]` ou `float[]` de taille connue utilisé temporairement (copie de section, sérialisation) :
+
+```csharp
+using System.Buffers;
+
+var buffer = ArrayPool<float>.Shared.Rent(taille);
+try
+{
+    // ... utiliser buffer ...
+}
+finally
+{
+    ArrayPool<float>.Shared.Return(buffer);
+}
+```
+
+**Ne jamais** garder un buffer ArrayPool sans le `Return` : on Rent au début, Return à la fin (try/finally).
+
+## 3. Timers et Time Slicing
+
+Si un Timer ou `_Process` déclenche une action lourde (sauvegarde disque, synchronisation réseau, simulation d'eau) à intervalle fixe, **lisser l’action** : traiter N éléments par frame au lieu de tout d’un coup.
+
+Exemple (eau) : `int n = Math.Min(_fileEau.Count, MaxEauParTick);` au lieu de traiter toute la file.
+
+## 4. Profiler forcé (diagnostic lag idle)
+
+Si le lag de 1–2 secondes persiste malgré les verrous, **tu n'as pas le droit de deviner**. L'humain doit :
+
+1. Ouvrir le **Profiler Godot** : Onglet Debugger (en bas) → Profiler → bouton **Start**
+2. Lancer le jeu et reproduire le freeze
+3. Regarder le graphique au moment du lag
+4. Donner **le nom exact de la fonction C#** qui affiche un pic (spike)
+
+Sans cette donnée, toute modification supplémentaire est une supposition.

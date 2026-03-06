@@ -1,0 +1,8 @@
+[gd_scene format=3 uid="uid://2u1ctkvtum"]
+
+[ext_resource type="Script" uid="uid://ofpkf0xv856" path="res://Client/Chunk_Client.cs" id="1_chunk"]
+[ext_resource type="Material" uid="uid://d0kcri8yqfqre" path="res://Manteau_Planetaire.tres" id="2_mat"]
+
+[node name="Chunk_Client" type="Node3D" unique_id=527359244]
+script = ExtResource("1_chunk")
+MaterielTerre = ExtResource("2_mat")
