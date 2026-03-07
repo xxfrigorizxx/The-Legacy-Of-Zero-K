@@ -1,6 +1,7 @@
 using Godot;
 using System;
 using System.Collections.Generic;
+using System.IO;
 
 /// <summary>Données voxel et logique de génération pour un chunk. Aucun MeshInstance3D.</summary>
 public partial class Chunk_Serveur : RefCounted
@@ -41,7 +42,7 @@ public partial class Chunk_Serveur : RefCounted
 	private Action<Vector3I, byte> _onVoxelModifie;
 	private Action<Vector2I, Dictionary<Vector3I, byte>> _onFlorePurgée;
 
-	/// <summary>True si le joueur a miné/placé ou si le chunk a été généré (pas chargé). Sauvegarde uniquement si true.</summary>
+	/// <summary>Drapeau de souillure : true UNIQUEMENT quand DetruireVoxel ou CreerMatiere sont appelés. On ne sauvegarde JAMAIS un chunk intact.</summary>
 	private bool _estModifie;
 	/// <summary>True si chargé depuis disque. AUCUNE passe de génération ne doit jamais s'exécuter sur ce chunk.</summary>
 	private bool _chargeDepuisDisque;
@@ -205,7 +206,7 @@ public partial class Chunk_Serveur : RefCounted
 					}
 				}
 			}
-			_estModifie = true; // Chunk généré ex nihilo → doit être sauvegardé au déchargement.
+			// RÈGLE : Chunk procédural non touché par le joueur → jamais sauvegardé (régénération à la demande).
 		}
 	}
 
@@ -308,7 +309,7 @@ public partial class Chunk_Serveur : RefCounted
 		return 1;
 	}
 
-	/// <summary>Tableau C# byte[] pour StoreBuffer. Format: densities (4×N) + materials (1×N) + densitiesEau (4×N).</summary>
+	/// <summary>Tableau C# byte[] pour sauvegarde binaire. Format: densities (4×N) + materials (1×N) + densitiesEau (4×N).</summary>
 	public byte[] ObtenirTableauBytes()
 	{
 		int tx = TailleChunk + 1, ty = HauteurMax + 1, tz = TailleChunk + 1;
@@ -327,6 +328,23 @@ public partial class Chunk_Serveur : RefCounted
 					}
 		}
 		return bytes;
+	}
+
+	/// <summary>Sauvegarde binaire sur disque. NE sauvegarde QUE si EstModifie (touché par DetruireVoxel/CreerMatiere).</summary>
+	public void SauvegarderChunkSurDisque()
+	{
+		if (!_estModifie) return;
+		string dossierSave = ProjectSettings.GlobalizePath("user://saves/MonMonde/chunks/");
+		Directory.CreateDirectory(dossierSave);
+		string cheminFichier = Path.Combine(dossierSave, $"chunk_{ChunkOffsetX}_{ChunkOffsetZ}.bin");
+		byte[] donnees = ObtenirTableauBytes();
+		using (var writer = new BinaryWriter(File.Open(cheminFichier, FileMode.Create)))
+		{
+			writer.Write((byte)1);
+			writer.Write(donnees.Length);
+			writer.Write(donnees);
+		}
+		GD.Print($"ZERO-K : Cicatrice mémorisée. Chunk {ChunkOffsetX}_{ChunkOffsetZ} gravé sur le disque.");
 	}
 
 	/// <summary>Désérialise depuis byte[] (GetBuffer). Chunk chargé = pas modifié.</summary>
@@ -407,7 +425,6 @@ public partial class Chunk_Serveur : RefCounted
 		}
 		if (floreMorte.Count == 0) return;
 		foreach (var mort in floreMorte) InventaireFlore.Remove(mort);
-		_estModifie = true;
 		_onFlorePurgée?.Invoke(new Vector2I(ChunkOffsetX, ChunkOffsetZ), new Dictionary<Vector3I, byte>(InventaireFlore));
 	}
 
@@ -464,10 +481,7 @@ public partial class Chunk_Serveur : RefCounted
 			}
 		}
 		if (floreDetruite.Count > 0)
-		{
-			_estModifie = true;
 			_onFlorePurgée?.Invoke(new Vector2I(ChunkOffsetX, ChunkOffsetZ), new Dictionary<Vector3I, byte>(InventaireFlore));
-		}
 
 		lock (_verrouVoxel)
 		{
@@ -660,7 +674,6 @@ public partial class Chunk_Serveur : RefCounted
 			_densities[x, y, z] = -10.0f;
 			_materials[x, y, z] = 4;
 			if (_densitiesEau != null) _densitiesEau[x, y, z] = 1.0f;
-			_estModifie = true;
 		}
 		AuditerGraviteFlore();
 	}
@@ -673,7 +686,6 @@ public partial class Chunk_Serveur : RefCounted
 			_densities[x, y, z] = -10.0f;
 			_materials[x, y, z] = 0;
 			if (_densitiesEau != null) _densitiesEau[x, y, z] = -1.0f;
-			_estModifie = true;
 		}
 		AuditerGraviteFlore();
 	}
@@ -702,7 +714,6 @@ public partial class Chunk_Serveur : RefCounted
 				_materials[lx, ly, lz] = id;
 				if (_densitiesEau != null) _densitiesEau[lx, ly, lz] = -1.0f;
 			}
-			_estModifie = true;
 		}
 		AuditerGraviteFlore();
 	}

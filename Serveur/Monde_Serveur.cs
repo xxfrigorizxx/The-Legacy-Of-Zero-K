@@ -2,7 +2,9 @@ using Godot;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading.Tasks;
+using FileAccess = Godot.FileAccess;
 
 /// <summary>Détient les chunks serveur (données voxel), la génération, la simulation d'eau. Aucun MeshInstance3D.</summary>
 public partial class Monde_Serveur : Node
@@ -66,7 +68,7 @@ public partial class Monde_Serveur : Node
 		_onVoxelModifie = onVoxelModifie;
 		_onOrdonnerDestructionChunk = onOrdonnerDestructionChunk;
 		_obtenirPositionJoueur = obtenirPositionJoueur;
-		DirAccess.MakeDirRecursiveAbsolute("user://chunks");
+		DirAccess.MakeDirRecursiveAbsolute("user://saves/MonMonde/chunks");
 	}
 
 	/// <summary>Sauvegarde d'urgence : sauvegarde uniquement les chunks modifiés (EstModifie).</summary>
@@ -80,7 +82,7 @@ public partial class Monde_Serveur : Node
 			Chunk_Serveur chunk = kvp.Value;
 			if (chunk.EstModifie)
 			{
-				SauvegarderChunkSurDisque(coord, chunk);
+				chunk.SauvegarderChunkSurDisque();
 				chunksSauves++;
 			}
 		}
@@ -293,57 +295,58 @@ public partial class Monde_Serveur : Node
 
 	private static bool FichierChunkExiste(Vector2I coord)
 	{
-		return FileAccess.FileExists(DonneesChunk.ObtenirCheminChunk(coord));
+		return File.Exists(ProjectSettings.GlobalizePath(DonneesChunk.ObtenirCheminChunk(coord)));
 	}
 
 	private static string ObtenirCheminSauvegarde(Vector2I coord) => DonneesChunk.ObtenirCheminChunk(coord);
 
-	/// <summary>Sauvegarde sécurisée (StoreBuffer byte[]). NE sauvegarde QUE si EstModifie.</summary>
+	/// <summary>Délègue au chunk la sauvegarde binaire. NE sauvegarde QUE si EstModifie.</summary>
 	private void SauvegarderChunkSurDisque(Vector2I coord, Chunk_Serveur chunk)
 	{
-		if (!chunk.EstModifie) return;
-		string chemin = ObtenirCheminSauvegarde(coord);
-		using var file = FileAccess.Open(chemin, FileAccess.ModeFlags.Write);
-		if (file == null)
-		{
-			GD.PrintErr($"ZERO-K ALERTE : Impossible d'écrire le chunk {coord}");
-			return;
-		}
-		byte[] donneesVoxels = chunk.ObtenirTableauBytes();
-		file.Store32((uint)donneesVoxels.Length);
-		if (!file.StoreBuffer(donneesVoxels))
-		{
-			GD.PrintErr($"ZERO-K ALERTE : StoreBuffer a échoué pour le chunk {coord}");
-			return;
-		}
-		file.Flush();
+		chunk.SauvegarderChunkSurDisque();
 	}
 
-	/// <summary>Chargement via GetBuffer (byte[]). LE SÉRUM DE VÉRITÉ : diagnostics chirurgicaux.</summary>
+	/// <summary>Résurrection : chargement binaire via BinaryReader. Si fichier absent ou corrompu → régénération procédurale.</summary>
 	private Chunk_Serveur ChargerChunkDepuisDisque(Vector2I coord)
 	{
 		GD.Print($"ZERO-K DIAG : Tentative chargement Chunk {coord}...");
-		string chemin = ObtenirCheminSauvegarde(coord);
-		using var file = FileAccess.Open(chemin, FileAccess.ModeFlags.Read);
-		if (file == null)
+		string cheminGodot = ObtenirCheminSauvegarde(coord);
+		string cheminAbsolu = ProjectSettings.GlobalizePath(cheminGodot);
+		if (!File.Exists(cheminAbsolu))
 		{
-			GD.PrintErr($"ZERO-K REJET : Chunk {coord} — fichier illisible ou inexistant.");
+			GD.PrintErr($"ZERO-K REJET : Chunk {coord} — fichier inexistant.");
 			return null;
 		}
-		uint tailleLu = file.Get32();
 		int voxelCount = (TailleChunk + 1) * (HauteurMax + 1) * (TailleChunk + 1);
 		int tailleAttendue = voxelCount * 9;
-
-		if (tailleLu != tailleAttendue)
+		byte[] donneesVoxels;
+		try
 		{
-			GD.PrintErr($"ZERO-K REJET : Chunk {coord} corrompu (taille header {tailleLu} ≠ {tailleAttendue}). Régénération forcée.");
+			using (var reader = new BinaryReader(File.Open(cheminAbsolu, FileMode.Open, System.IO.FileAccess.Read, FileShare.Read)))
+			{
+				byte version = reader.ReadByte();
+				if (version != 1)
+				{
+					GD.PrintErr($"ZERO-K REJET : Chunk {coord} — version {version} non supportée.");
+					return null;
+				}
+				int tailleLu = reader.ReadInt32();
+				if (tailleLu != tailleAttendue)
+				{
+					GD.PrintErr($"ZERO-K REJET : Chunk {coord} corrompu (taille {tailleLu} ≠ {tailleAttendue}). Régénération forcée.");
+					return null;
+				}
+				donneesVoxels = reader.ReadBytes(tailleLu);
+			}
+		}
+		catch (Exception ex)
+		{
+			GD.PrintErr($"ZERO-K REJET : Chunk {coord} — erreur lecture : {ex.Message}");
 			return null;
 		}
-		byte[] donneesVoxels = file.GetBuffer((long)tailleLu);
-		// LE MOUCHARD ABSOLU :
 		if (donneesVoxels == null || donneesVoxels.Length != tailleAttendue)
 		{
-			GD.PrintErr($"ZERO-K REJET : Chunk {coord} refusé ! Taille lue : {donneesVoxels?.Length ?? 0} | Attendue : {tailleAttendue}. Régénération forcée.");
+			GD.PrintErr($"ZERO-K REJET : Chunk {coord} refusé ! Taille lue : {donneesVoxels?.Length ?? 0} | Attendue : {tailleAttendue}.");
 			return null;
 		}
 		GD.Print($"ZERO-K SUCCÈS : Chunk {coord} chargé depuis le disque ({donneesVoxels.Length} bytes).");
@@ -408,7 +411,7 @@ public partial class Monde_Serveur : Node
 		{
 			for (float z = 0; z < tailleChunk; z += 3f)
 			{
-				if (rng.Randf() > 0.10f) continue; // RARETÉ : 90% du temps, on ne fait rien
+				if (rng.Randf() > 0.02f) continue; // PURGE LOGISTIQUE : 98% du temps, on ne fait rien (rareté précieuse)
 				int lx = Mathf.Clamp(Mathf.FloorToInt(x), 0, (int)tailleChunk);
 				int lz = Mathf.Clamp(Mathf.FloorToInt(z), 0, (int)tailleChunk);
 				var (ySurface, idMatiere) = chunk.ObtenirSurfaceEtMateriau(lx, lz);
@@ -678,10 +681,11 @@ public partial class Monde_Serveur : Node
 		{
 			if (_chunks.TryGetValue(coord, out var chunk))
 			{
-				if (chunk.EstModifie) SauvegarderChunkSurDisque(coord, chunk); // Drapeau : sauvegarde uniquement si modifié.
+				if (chunk.EstModifie) chunk.SauvegarderChunkSurDisque(); // Drapeau : sauvegarde uniquement si touché par le joueur.
 				_chunks.Remove(coord);
 				_onOrdonnerDestructionChunk(coord);
 			}
 		}
 	}
 }
+

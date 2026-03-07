@@ -22,7 +22,8 @@ public partial class DonneesChunk : RefCounted
 	public float[] DensitiesFlat;
 	public float[] DensitiesEauFlat;
 
-	public static string ObtenirCheminChunk(Vector2I coord) => $"user://chunks/chunk_{coord.X}_{coord.Y}.dat";
+	/// <summary>Chemin binaire pour sauvegarde/chargement des chunks modifiés par le joueur.</summary>
+	public static string ObtenirCheminChunk(Vector2I coord) => $"user://saves/MonMonde/chunks/chunk_{coord.X}_{coord.Y}.bin";
 
 	/// <summary>Échelle pour normaliser les densités (typiquement -64 à 64 → -1 à 1).</summary>
 	private const float EchelleQuantification = 64f;
