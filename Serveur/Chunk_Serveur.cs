@@ -252,6 +252,19 @@ public partial class Chunk_Serveur : RefCounted
 		return diffMax < SEUIL_PENTE_MAX;
 	}
 
+	/// <summary>Retourne (hauteur surface, matériau) pour ensemencement. (-1, 0) si pas de sol.</summary>
+	public (int ySurface, byte mat) ObtenirSurfaceEtMateriau(int lx, int lz)
+	{
+		int y = ObtenirHauteurSurfaceLocale(lx, lz);
+		if (y < 0) return (-1, 0);
+		lock (_verrouVoxel)
+		{
+			byte mat = _materials[lx, y, lz];
+			if (mat == 4) mat = 3; // Cécité hydrique : eau → sable
+			return (y, mat);
+		}
+	}
+
 	/// <summary>Hauteur de surface depuis les données chargées (chunks disque). -1 si hors limites ou pas de sol.</summary>
 	private int ObtenirHauteurSurfaceLocale(int lx, int lz)
 	{

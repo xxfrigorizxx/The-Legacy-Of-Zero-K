@@ -124,6 +124,7 @@ public partial class Monde_Serveur : Node
 				continue; // Chunk déjà ressuscité du disque — ignorer le résultat procédural.
 			if (!_chunks.ContainsKey(result.coord))
 				_chunks[result.coord] = result.chunk;
+			DeclencherEnsemencement(result.coord, result.chunk, TailleChunk);
 			var donnees = _chunks[result.coord].ObtenirDonneesPourClient();
 			_fileEnvoiReseau.Enqueue(new ColisChunk { Coord = result.coord, Donnees = donnees });
 		}
@@ -199,6 +200,9 @@ public partial class Monde_Serveur : Node
 			_onEnvoyerChunk?.Invoke(colis.Coord, colis.Donnees);
 			envoisCeTick++;
 		}
+
+		// Réveil des pierres dormantes : quand joueur dans 2 chunks, le terrain est chargé → on dégèle
+		ReveillerPierresDansRayon();
 
 		_tempsEcoulement += (float)delta;
 		if (_tempsEcoulement < TICK_EAU) return;
@@ -372,6 +376,135 @@ public partial class Monde_Serveur : Node
 		var bloc = BlocChutant.Creer(pos, mat, matTerrain);
 		_parentPourBlocsChutants.AddChild(bloc);
 		bloc.GlobalPosition = pos;
+	}
+
+	private const float NIVEAU_EAU = 102f;
+	private const float DECALAGE_SPAWN_VERTICAL = 0.5f; // Évite l'encastrement : l'objet tombe au lieu de s'enfoncer
+	/// <summary>Rayon en chunks : pierres gelées s'activent quand le joueur entre dans cette zone (comme le gazon). Chunk garanti chargé.</summary>
+	private const int RAYON_ACTIVATION_PIERRES_CHUNKS = 2;
+	private const int ID_PETITE_PIERRE = 10;
+
+	/// <summary>Délai de synchronisation : attend 2 frames physiques pour que le ConcavePolygonShape3D du terrain soit enregistré avant d'ensemencer.</summary>
+	private async void DeclencherEnsemencement(Vector2I chunkCoord, Chunk_Serveur chunk, float tailleChunk)
+	{
+		await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame);
+		await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame);
+		EnsemencerChunk(chunkCoord, chunk, tailleChunk);
+	}
+
+	private const int ID_SILEX = 11;
+	private const int ID_PIERRE_MOYENNE = 12;
+	private const int ID_GROSSE_PIERRE = 13;
+	private const int ID_TRES_GROSSE_PIERRE = 14;
+
+	/// <summary>Pluie de lasers : scanne la surface du chunk (pas 3 m). Filtre géologique : pierres selon ID du sol. Silex inchangé.</summary>
+	private void EnsemencerChunk(Vector2I chunkCoord, Chunk_Serveur chunk, float tailleChunk)
+	{
+		if (_parentPourBlocsChutants == null) return;
+		var rng = new RandomNumberGenerator();
+		rng.Seed = (ulong)(chunkCoord.X * 73856093 + chunkCoord.Y * 19349663 + SeedTerrain);
+
+		for (float x = 0; x < tailleChunk; x += 3f)
+		{
+			for (float z = 0; z < tailleChunk; z += 3f)
+			{
+				if (rng.Randf() > 0.10f) continue; // RARETÉ : 90% du temps, on ne fait rien
+				int lx = Mathf.Clamp(Mathf.FloorToInt(x), 0, (int)tailleChunk);
+				int lz = Mathf.Clamp(Mathf.FloorToInt(z), 0, (int)tailleChunk);
+				var (ySurface, idMatiere) = chunk.ObtenirSurfaceEtMateriau(lx, lz);
+				if (ySurface < 0) continue;
+
+				Vector3 pointImpact = new Vector3(
+					chunkCoord.X * tailleChunk + x + 0.5f,
+					ySurface + 0.5f,
+					chunkCoord.Y * tailleChunk + z + 0.5f
+				);
+				// DÉCALAGE DE SÉCURITÉ : on monte l'objet au-dessus du sol pour éviter l'encastrement
+				Vector3 pointDeSpawnSecurise = pointImpact + new Vector3(0, DECALAGE_SPAWN_VERTICAL, 0);
+
+				// Silex : sable sous l'eau (inchangé)
+				if (idMatiere == 3 && pointImpact.Y < NIVEAU_EAU)
+				{
+					GenererItemPhysique(pointDeSpawnSecurise, ID_SILEX);
+					continue;
+				}
+
+				// Filtre géologique des pierres
+				int idTailleChoisie = 0;
+				float proba = rng.Randf();
+				if (idMatiere == 1 || idMatiere == 3) // Terre, Sable
+					idTailleChoisie = ID_PETITE_PIERRE;
+				else if (idMatiere == 7 || idMatiere == 8) // Boue, Argile
+					idTailleChoisie = (proba > 0.4f) ? ID_PETITE_PIERRE : ID_PIERRE_MOYENNE;
+				else if (idMatiere == 2) // Roche pure
+				{
+					if (proba < 0.40f) idTailleChoisie = ID_PETITE_PIERRE;
+					else if (proba < 0.70f) idTailleChoisie = ID_PIERRE_MOYENNE;
+					else if (proba < 0.90f) idTailleChoisie = ID_GROSSE_PIERRE;
+					else idTailleChoisie = ID_TRES_GROSSE_PIERRE;
+				}
+
+				if (idTailleChoisie != 0)
+					GenererItemPhysique(pointDeSpawnSecurise, idTailleChoisie);
+			}
+		}
+	}
+
+	/// <summary>Crée un objet physique (pierres 10–14 ou Silex 11) avec ItemPhysique pour le ramassage.</summary>
+	private void GenererItemPhysique(Vector3 position, int idObjet)
+	{
+		if (_parentPourBlocsChutants == null) return;
+		Node3D corps;
+		if (idObjet == ID_SILEX)
+		{
+			var sb = new StaticBody3D();
+			var mesh = new MeshInstance3D { Mesh = new PrismMesh { Size = new Vector3(0.2f, 0.15f, 0.25f) } };
+			mesh.MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.6f, 0.55f, 0.5f) };
+			sb.AddChild(mesh);
+			sb.AddChild(new CollisionShape3D { Shape = new BoxShape3D { Size = new Vector3(0.2f, 0.15f, 0.25f) } });
+			corps = sb;
+		}
+		else
+		{
+			// Pierres 10, 12, 13, 14 : RigidBody3D gelé à la naissance (dormance). Réveil quand joueur dans rayon.
+			float rayon = idObjet == ID_PETITE_PIERRE ? 0.15f
+				: idObjet == ID_PIERRE_MOYENNE ? 0.25f
+				: idObjet == ID_GROSSE_PIERRE ? 0.4f
+				: 0.6f; // ID_TRES_GROSSE_PIERRE
+			float hauteur = rayon * 2f;
+			var rb = new RigidBody3D();
+			rb.Freeze = true; // Dormance : pas de physique tant que joueur hors rayon (chunk sûr chargé)
+			var mesh = new MeshInstance3D { Mesh = new SphereMesh { Radius = rayon, Height = hauteur } };
+			mesh.MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.5f, 0.45f, 0.4f) };
+			rb.AddChild(mesh);
+			rb.AddChild(new CollisionShape3D { Shape = new SphereShape3D { Radius = rayon } });
+			corps = rb;
+		}
+		var item = new ItemPhysique { ID_Objet = idObjet, Name = "ItemPhysique" };
+		corps.AddChild(item);
+		_parentPourBlocsChutants.AddChild(corps);
+		corps.GlobalPosition = position;
+	}
+
+	/// <summary>Rayon en unités : pierres gelées se réveillent quand joueur entre (2 chunks = terrain chargé).</summary>
+	private float RayonActivationPierres => RAYON_ACTIVATION_PIERRES_CHUNKS * TailleChunk;
+
+	/// <summary>Dégèle les RigidBody3D pierres (IDs 10,12,13,14) quand le joueur est dans le rayon. Chunk garanti chargé.</summary>
+	private void ReveillerPierresDansRayon()
+	{
+		if (_parentPourBlocsChutants == null || _obtenirPositionJoueur == null) return;
+		Vector3 posJoueur = _obtenirPositionJoueur();
+		float rayonCarre = RayonActivationPierres * RayonActivationPierres;
+		foreach (Node child in _parentPourBlocsChutants.GetChildren())
+		{
+			if (child is not RigidBody3D rb || !rb.Freeze) continue;
+			var item = rb.GetNodeOrNull<ItemPhysique>("ItemPhysique");
+			if (item == null) continue;
+			int id = item.ID_Objet;
+			if (id != ID_PETITE_PIERRE && id != ID_PIERRE_MOYENNE && id != ID_GROSSE_PIERRE && id != ID_TRES_GROSSE_PIERRE) continue;
+			if (rb.GlobalPosition.DistanceSquaredTo(posJoueur) <= rayonCarre)
+				rb.Freeze = false;
+		}
 	}
 
 	public void AppliquerDestructionGlobale(Vector3 pointImpact, float rayon, int peerDemandeur = -1)
