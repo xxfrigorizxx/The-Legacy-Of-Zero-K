@@ -460,8 +460,8 @@ public partial class Monde_Serveur : Node
 		}
 	}
 
-	/// <summary>Crée un objet physique (pierres 10–14 ou Silex 11) avec ItemPhysique pour le ramassage.</summary>
-	private void GenererItemPhysique(Vector3 position, int idObjet)
+	/// <summary>Crée un objet physique (pierres 10–14 ou Silex 11). indexCache = -1 pour tirage aléatoire au spawn.</summary>
+	private void GenererItemPhysique(Vector3 position, int idObjet, int indexCache = -1)
 	{
 		if (_parentPourBlocsChutants == null) return;
 		Node3D corps;
@@ -490,7 +490,7 @@ public partial class Monde_Serveur : Node
 			rb.AddChild(new CollisionShape3D { Shape = new SphereShape3D { Radius = rayon } });
 			corps = rb;
 		}
-		var item = new ItemPhysique { ID_Objet = idObjet, Name = "ItemPhysique" };
+		var item = new ItemPhysique { ID_Objet = idObjet, IndexCacheMemoire = indexCache, Name = "ItemPhysique" };
 		corps.AddChild(item);
 		_parentPourBlocsChutants.AddChild(corps);
 		corps.GlobalPosition = position;
@@ -520,7 +520,7 @@ public partial class Monde_Serveur : Node
 		}
 	}
 
-	/// <summary>Sauvegarde les pierres et silex (IDs 10-14) dont la position est dans le chunk.</summary>
+	/// <summary>Sauvegarde les pierres et silex (IDs 10-14) avec IndexCacheMemoire pour conserver la forme exacte.</summary>
 	private void SauvegarderPierresChunk(Vector2I coord)
 	{
 		if (_parentPourBlocsChutants == null) return;
@@ -528,7 +528,7 @@ public partial class Monde_Serveur : Node
 		float xMax = (coord.X + 1) * TailleChunk;
 		float zMin = coord.Y * TailleChunk;
 		float zMax = (coord.Y + 1) * TailleChunk;
-		var pierres = new List<(Vector3 pos, int id)>();
+		var pierres = new List<(Vector3 pos, int id, int index)>();
 		foreach (Node child in _parentPourBlocsChutants.GetChildren())
 		{
 			var item = child.GetNodeOrNull<ItemPhysique>("ItemPhysique");
@@ -537,7 +537,7 @@ public partial class Monde_Serveur : Node
 			if (id < 10 || id > 14) continue;
 			Vector3 pos = (child as Node3D)?.GlobalPosition ?? Vector3.Zero;
 			if (pos.X >= xMin && pos.X < xMax && pos.Z >= zMin && pos.Z < zMax)
-				pierres.Add((pos, id));
+				pierres.Add((pos, id, Mathf.Max(0, item.IndexCacheMemoire)));
 		}
 		if (pierres.Count == 0) return;
 		string nom = GameState.Instance?.NomMondeActuel ?? "MonMonde";
@@ -548,18 +548,20 @@ public partial class Monde_Serveur : Node
 		{
 			using (var w = new BinaryWriter(File.Open(chemin, FileMode.Create)))
 			{
+				w.Write(0x5A4B3249); // Magic "I2KZ" = format v2 avec IndexCacheMemoire
 				w.Write(pierres.Count);
-				foreach (var (pos, id) in pierres)
+				foreach (var (pos, id, index) in pierres)
 				{
 					w.Write(pos.X); w.Write(pos.Y); w.Write(pos.Z);
 					w.Write((byte)id);
+					w.Write((byte)index);
 				}
 			}
 		}
 		catch (Exception ex) { GD.PrintErr($"ZERO-K : Erreur sauvegarde pierres chunk {coord} : {ex.Message}"); }
 	}
 
-	/// <summary>Charge et spawn les pierres sauvegardées. Retourne true si fichier existait et a été chargé.</summary>
+	/// <summary>Charge et spawn les pierres sauvegardées. Rétrocompatible : v1 sans index, v2 = premier byte 0x02.</summary>
 	private bool ChargerEtSpawnerPierresChunk(Vector2I coord)
 	{
 		if (_parentPourBlocsChutants == null) return false;
@@ -568,15 +570,19 @@ public partial class Monde_Serveur : Node
 		if (!File.Exists(chemin)) return false;
 		try
 		{
-			using (var r = new BinaryReader(File.Open(chemin, FileMode.Open, System.IO.FileAccess.Read, FileShare.Read)))
+			using (var stream = File.Open(chemin, FileMode.Open, System.IO.FileAccess.Read, FileShare.Read))
+			using (var r = new BinaryReader(stream))
 			{
-				int count = r.ReadInt32();
+				int magicOrCount = r.ReadInt32();
+				bool formatV2 = (magicOrCount == 0x5A4B3249); // "I2KZ"
+				int count = formatV2 ? r.ReadInt32() : magicOrCount;
 				for (int i = 0; i < count; i++)
 				{
 					float x = r.ReadSingle(), y = r.ReadSingle(), z = r.ReadSingle();
 					int id = r.ReadByte();
+					int indexCache = formatV2 ? r.ReadByte() : -1;
 					if (id >= 10 && id <= 14)
-						GenererItemPhysique(new Vector3(x, y, z), id);
+						GenererItemPhysique(new Vector3(x, y, z), id, indexCache);
 				}
 			}
 			return true;

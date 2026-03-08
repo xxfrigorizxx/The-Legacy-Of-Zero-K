@@ -7,11 +7,19 @@ using System.Collections.Generic;
 public partial class ItemPhysique : Node3D
 {
 	[Export] public int ID_Objet = 0;
+	/// <summary>Sauvegarde de la forme exacte (index dans la banque d'ADN). -1 = tirage aléatoire au spawn.</summary>
+	public int IndexCacheMemoire = -1;
 
-	private static readonly List<Mesh> CacheMeshCaillou = new List<Mesh>();
-	private static readonly List<Shape3D> CacheCollisionCaillou = new List<Shape3D>();
-	private static readonly List<Mesh> CacheMeshSilex = new List<Mesh>();
-	private static readonly List<Shape3D> CacheCollisionSilex = new List<Shape3D>();
+	/// <summary>Banque d'ADN : accès public pour rendu en main et UI inventaire.</summary>
+	public static IReadOnlyList<Mesh> CacheMeshCaillou => _cacheMeshCaillou;
+	public static IReadOnlyList<Shape3D> CacheCollisionCaillou => _cacheCollisionCaillou;
+	public static IReadOnlyList<Mesh> CacheMeshSilex => _cacheMeshSilex;
+	public static IReadOnlyList<Shape3D> CacheCollisionSilex => _cacheCollisionSilex;
+
+	private static readonly List<Mesh> _cacheMeshCaillou = new List<Mesh>();
+	private static readonly List<Shape3D> _cacheCollisionCaillou = new List<Shape3D>();
+	private static readonly List<Mesh> _cacheMeshSilex = new List<Mesh>();
+	private static readonly List<Shape3D> _cacheCollisionSilex = new List<Shape3D>();
 	private const int NbVariationsCache = 10;
 
 	public override void _Ready()
@@ -28,28 +36,29 @@ public partial class ItemPhysique : Node3D
 
 		AppliquerMateriel(visuel);
 
-		if (ID_Objet == 11) // SILEX
-		{
-			lock (CacheMeshSilex)
-			{
-				if (CacheMeshSilex.Count < NbVariationsCache)
-					GenererEtMettreEnCache(true);
-			}
-			int idx = GD.RandRange(0, Mathf.Max(0, CacheMeshSilex.Count - 1));
-			visuel.Mesh = CacheMeshSilex[idx];
-			hitbox.Shape = CacheCollisionSilex[idx];
-		}
-		else // CAILLOU / PIERRES (10, 12, 13, 14)
-		{
-			lock (CacheMeshCaillou)
-			{
-				if (CacheMeshCaillou.Count < NbVariationsCache)
-					GenererEtMettreEnCache(false);
-			}
-			int idx = GD.RandRange(0, Mathf.Max(0, CacheMeshCaillou.Count - 1));
-			visuel.Mesh = CacheMeshCaillou[idx];
-			hitbox.Shape = CacheCollisionCaillou[idx];
+		// MODIFICATION CRITIQUE : Si IndexCacheMemoire déjà défini (objet relâché par le joueur), on NE TIRE PAS au hasard.
+		if (IndexCacheMemoire == -1)
+			IndexCacheMemoire = ID_Objet == 11
+				? PreparerCacheEtTirerIndex(true)
+				: PreparerCacheEtTirerIndex(false);
 
+		// Appliquer la forme EXACTE depuis le cache
+		int idx = Mathf.Clamp(IndexCacheMemoire, 0, int.MaxValue);
+		if (ID_Objet == 11)
+		{
+			if (idx < _cacheMeshSilex.Count)
+			{
+				visuel.Mesh = _cacheMeshSilex[idx];
+				hitbox.Shape = _cacheCollisionSilex[idx];
+			}
+		}
+		else
+		{
+			if (idx < _cacheMeshCaillou.Count)
+			{
+				visuel.Mesh = _cacheMeshCaillou[idx];
+				hitbox.Shape = _cacheCollisionCaillou[idx];
+			}
 			// Mise à l'échelle selon la taille (cache = unité 0.15)
 			float scale = ID_Objet == 10 ? 1f : ID_Objet == 12 ? 0.25f / 0.15f : ID_Objet == 13 ? 0.4f / 0.15f : 0.6f / 0.15f;
 			if (parent is Node3D n3d)
@@ -57,6 +66,25 @@ public partial class ItemPhysique : Node3D
 		}
 
 		RotationDegrees = new Vector3(GD.RandRange(0, 360), GD.RandRange(0, 360), GD.RandRange(0, 360));
+	}
+
+	private int PreparerCacheEtTirerIndex(bool estSilex)
+	{
+		if (estSilex)
+		{
+			lock (_cacheMeshSilex)
+			{
+				if (_cacheMeshSilex.Count < NbVariationsCache)
+					GenererEtMettreEnCache(true);
+				return GD.RandRange(0, Mathf.Max(0, _cacheMeshSilex.Count - 1));
+			}
+		}
+		lock (_cacheMeshCaillou)
+		{
+			if (_cacheMeshCaillou.Count < NbVariationsCache)
+				GenererEtMettreEnCache(false);
+			return GD.RandRange(0, Mathf.Max(0, _cacheMeshCaillou.Count - 1));
+		}
 	}
 
 	private void AppliquerMateriel(MeshInstance3D visuel)
@@ -164,13 +192,13 @@ public partial class ItemPhysique : Node3D
 
 		if (estSilex)
 		{
-			CacheMeshSilex.Add(nouveauMesh);
-			CacheCollisionSilex.Add(nouvelleCollision);
+			_cacheMeshSilex.Add(nouveauMesh);
+			_cacheCollisionSilex.Add(nouvelleCollision);
 		}
 		else
 		{
-			CacheMeshCaillou.Add(nouveauMesh);
-			CacheCollisionCaillou.Add(nouvelleCollision);
+			_cacheMeshCaillou.Add(nouveauMesh);
+			_cacheCollisionCaillou.Add(nouvelleCollision);
 		}
 	}
 }
