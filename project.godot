@@ -8,10 +8,14 @@
 
 config_version=5
 
+[autoload]
+
+GameState="*res://GameState.cs"
+
 [application]
 
 config/name="Zero-K : Frozen Legacy"
-run/main_scene="res://monde_zero.tscn"
+run/main_scene="res://menu_principal.tscn"
 config/features=PackedStringArray("4.6", "C#", "Forward Plus")
 config/icon="res://icon.svg"
 

@@ -183,6 +183,92 @@ public partial class Gestionnaire_Monde : Node3D
 
 		if (PreGenererAuDemarrage)
 			_ = PreGenererMonde(RayonPreGeneration);
+
+		CreerMenuPause();
+	}
+
+	public override void _Input(InputEvent @event)
+	{
+		if (@event.IsActionPressed("ui_cancel"))
+		{
+			ToggleMenuPause();
+			GetViewport().SetInputAsHandled();
+		}
+	}
+
+	public override void _Notification(int what)
+	{
+		if (what == Node.NotificationWMCloseRequest)
+		{
+			if (UseArchitectureReseau)
+				_mondeServeur?.SauvegarderMondeEntier();
+			else
+				foreach (var kv in _chunks)
+					(kv.Value as Generateur_Voxel)?.Sauvegarder(kv.Key);
+		}
+		base._Notification(what);
+	}
+
+	public override void _ExitTree()
+	{
+		// RÈGLE ABSOLUE : sauvegarde des chunks modifiés AVANT destruction (parent _ExitTree avant enfants).
+		if (UseArchitectureReseau)
+			_mondeServeur?.SauvegarderMondeEntier();
+		else
+		{
+			foreach (var kv in _chunks)
+				(kv.Value as Generateur_Voxel)?.Sauvegarder(kv.Key);
+		}
+		base._ExitTree();
+	}
+
+	private Panel _panelPause;
+	private bool _pauseVisible;
+
+	private void CreerMenuPause()
+	{
+		var layer = new CanvasLayer { Layer = 100, ProcessMode = ProcessModeEnum.Always };
+		AddChild(layer);
+		_panelPause = new Panel();
+		_panelPause.SetAnchorsPreset(Control.LayoutPreset.Center);
+		_panelPause.OffsetLeft = -100;
+		_panelPause.OffsetTop = -80;
+		_panelPause.OffsetRight = 100;
+		_panelPause.OffsetBottom = 80;
+		var vbox = new VBoxContainer();
+		vbox.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+		vbox.OffsetLeft = 20;
+		vbox.OffsetTop = 20;
+		vbox.OffsetRight = -20;
+		vbox.OffsetBottom = -20;
+		vbox.AddThemeConstantOverride("separation", 10);
+		_panelPause.AddChild(vbox);
+		var lbl = new Label { Text = "Pause", HorizontalAlignment = HorizontalAlignment.Center };
+		vbox.AddChild(lbl);
+		var btnResume = new Button { Text = "Reprendre" };
+		btnResume.Pressed += () => { ToggleMenuPause(); };
+		vbox.AddChild(btnResume);
+		var btnSave = new Button { Text = "Sauvegarder" };
+		btnSave.Pressed += () =>
+		{
+			_mondeServeur?.SauvegarderMondeEntier();
+			GD.Print("ZERO-K : Sauvegarde manuelle effectuée.");
+		};
+		vbox.AddChild(btnSave);
+		var btnQuit = new Button { Text = "Quitter" };
+		btnQuit.Pressed += () => GetTree().ChangeSceneToFile("res://menu_principal.tscn");
+		vbox.AddChild(btnQuit);
+		layer.AddChild(_panelPause);
+		_panelPause.Visible = false;
+	}
+
+	private void ToggleMenuPause()
+	{
+		if (_panelPause == null) CreerMenuPause();
+		_pauseVisible = !_pauseVisible;
+		_panelPause.Visible = _pauseVisible;
+		GetTree().Paused = _pauseVisible;
+		Input.MouseMode = _pauseVisible ? Input.MouseModeEnum.Visible : Input.MouseModeEnum.Captured;
 	}
 
 	private void DemarrerArchitectureReseau()
@@ -194,7 +280,7 @@ public partial class Gestionnaire_Monde : Node3D
 		_mondeServeur = new Monde_Serveur();
 		_mondeServeur.TailleChunk = TailleChunk;
 		_mondeServeur.HauteurMax = HauteurMax;
-		_mondeServeur.SeedTerrain = SeedTerrain;
+		_mondeServeur.SeedTerrain = GetNode<GameState>("/root/GameState").SeedTerrainActuel;
 		_mondeServeur.RenderDistance = RenderDistance;
 		_mondeServeur.FuseauHoraireHeures = FuseauHoraireHeures;
 		_mondeServeur.MaterielTerrain = MaterielTerrain ?? GD.Load<Material>("res://Manteau_Planetaire.tres");
@@ -207,7 +293,7 @@ public partial class Gestionnaire_Monde : Node3D
 		_mondeClient.MaterielTerrain = MaterielTerrain ?? GD.Load<Material>("res://Manteau_Planetaire.tres");
 		_mondeClient.Initialiser(
 			_joueur,
-			SeedTerrain,
+			GetNode<GameState>("/root/GameState").SeedTerrainActuel,
 			coord => _mondeServeur.EnregistrerDemandeChunk(coord),
 			(pointImpact, rayon) => _mondeServeur.AppliquerDestructionGlobale(pointImpact, rayon),
 			(pointImpact, normale, rayon, idMatiere) => _mondeServeur.AppliquerCreationGlobale(pointImpact, normale, rayon, idMatiere)

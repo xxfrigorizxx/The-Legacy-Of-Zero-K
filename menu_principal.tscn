@@ -1,0 +1,60 @@
+[gd_scene format=3 uid="uid://bxstwhm3rvlxw"]
+
+[ext_resource type="Script" path="res://MenuPrincipal.cs" id="1_menu"]
+
+[node name="MenuPrincipal" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_menu")
+
+[node name="ColorRect" type="ColorRect" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.12, 0.14, 0.2, 1)
+
+[node name="VBoxContainer" type="VBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -120.0
+offset_top = -120.0
+offset_right = 120.0
+offset_bottom = 120.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/separation = 12
+alignment = 1
+
+[node name="Titre" type="Label" parent="VBoxContainer"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.9, 0.85, 0.7, 1)
+theme_override_font_sizes/font_size = 24
+text = "Zero-K : Frozen Legacy"
+horizontal_alignment = 1
+
+[node name="BtnNewWorld" type="Button" parent="VBoxContainer"]
+layout_mode = 2
+text = "Nouveau Monde"
+
+[node name="ListeMondes" type="OptionButton" parent="VBoxContainer"]
+layout_mode = 2
+custom_minimum_size = Vector2(200, 0)
+
+[node name="BtnLoadGame" type="Button" parent="VBoxContainer"]
+layout_mode = 2
+text = "Charger Monde"
+
+[node name="BtnQuit" type="Button" parent="VBoxContainer"]
+layout_mode = 2
+text = "Quitter"
