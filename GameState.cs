@@ -6,8 +6,16 @@ using System.IO;
 /// <summary>État global du jeu. Autoload pour passer monde/seed entre menu et jeu.</summary>
 public partial class GameState : Node
 {
-	/// <summary>Nom du monde actuel (dossier dans user://saves/).</summary>
+	/// <summary>Instance statique pour accès fiable (Engine.HasSingleton peu fiable avec autoloads C#).</summary>
+	public static GameState Instance { get; private set; }
+
+	/// <summary>Nom du monde actuel (dossier dans user://saves/). TOUJOURS utilisé pour chunks.</summary>
 	public string NomMondeActuel { get; private set; } = "MonMonde";
+
+	public override void _Ready()
+	{
+		Instance = this;
+	}
 
 	/// <summary>Seed du terrain pour le monde actuel.</summary>
 	public int SeedTerrainActuel { get; private set; } = 19847;
@@ -45,9 +53,9 @@ public partial class GameState : Node
 				GD.PrintErr($"ZERO-K : Erreur lecture metadata : {ex.Message}");
 			}
 		}
-		else if (!Directory.Exists(dossier) || (!File.Exists(cheminMeta) && !Directory.Exists(Path.Combine(dossier, "chunks"))))
+		else if (!Directory.Exists(dossier))
 		{
-			GD.PrintErr($"ZERO-K : Monde '{nomMonde}' introuvable.");
+			GD.PrintErr($"ZERO-K : Monde '{nomMonde}' introuvable (dossier absent).");
 			return false;
 		}
 		NomMondeActuel = nomMonde;

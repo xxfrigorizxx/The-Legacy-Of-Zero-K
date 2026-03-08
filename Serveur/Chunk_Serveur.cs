@@ -334,9 +334,7 @@ public partial class Chunk_Serveur : RefCounted
 	public void SauvegarderChunkSurDisque()
 	{
 		if (!_estModifie) return;
-		string nom = "MonMonde";
-		if (Engine.HasSingleton("GameState") && Engine.GetSingleton("GameState") is GameState gs)
-			nom = gs.NomMondeActuel ?? nom;
+		string nom = GameState.Instance?.NomMondeActuel ?? "MonMonde";
 		string dossierSave = ProjectSettings.GlobalizePath($"user://saves/{nom}/chunks/");
 		Directory.CreateDirectory(dossierSave);
 		string cheminFichier = Path.Combine(dossierSave, $"chunk_{ChunkOffsetX}_{ChunkOffsetZ}.bin");

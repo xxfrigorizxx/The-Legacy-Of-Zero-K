@@ -62,15 +62,14 @@ adjustment_contrast = 1.25
 
 [node name="Gestionnaire_Monde" type="Node3D" parent="." unique_id=2015054098]
 script = ExtResource("3_monde")
-RenderDistance = 9
-MaxChunksParFrame = 6
-FuseauHoraireHeures = -15.0
+RenderDistance = 12
+MaxChunksParFrame = 8
+FuseauHoraireHeures = -9.0
 MaterielTerrain = ExtResource("14_manteau")
 
-[node name="HUD_Inventaire" type="CanvasLayer" parent="Gestionnaire_Monde"]
+[node name="HUD_Inventaire" type="CanvasLayer" parent="Gestionnaire_Monde" unique_id=1861864172]
 
-[node name="Conteneur_Ancrage" type="MarginContainer" parent="Gestionnaire_Monde/HUD_Inventaire"]
-layout_mode = 3
+[node name="Conteneur_Ancrage" type="MarginContainer" parent="Gestionnaire_Monde/HUD_Inventaire" unique_id=264852567]
 anchors_preset = 7
 anchor_left = 0.5
 anchor_top = 1.0
@@ -80,18 +79,20 @@ offset_left = -69.0
 offset_top = -84.0
 offset_right = 69.0
 offset_bottom = -20.0
+grow_horizontal = 2
+grow_vertical = 0
 theme_override_constants/margin_bottom = 20
 
-[node name="Boite_Slots" type="HBoxContainer" parent="Gestionnaire_Monde/HUD_Inventaire/Conteneur_Ancrage"]
+[node name="Boite_Slots" type="HBoxContainer" parent="Gestionnaire_Monde/HUD_Inventaire/Conteneur_Ancrage" unique_id=723286568]
 layout_mode = 2
 theme_override_constants/separation = 10
 alignment = 1
 
-[node name="Slot_Main_Gauche" type="Panel" parent="Gestionnaire_Monde/HUD_Inventaire/Conteneur_Ancrage/Boite_Slots"]
+[node name="Slot_Main_Gauche" type="Panel" parent="Gestionnaire_Monde/HUD_Inventaire/Conteneur_Ancrage/Boite_Slots" unique_id=970788211]
 custom_minimum_size = Vector2(64, 64)
 layout_mode = 2
 
-[node name="Slot_Main_Droite" type="Panel" parent="Gestionnaire_Monde/HUD_Inventaire/Conteneur_Ancrage/Boite_Slots"]
+[node name="Slot_Main_Droite" type="Panel" parent="Gestionnaire_Monde/HUD_Inventaire/Conteneur_Ancrage/Boite_Slots" unique_id=602911561]
 custom_minimum_size = Vector2(64, 64)
 layout_mode = 2
 

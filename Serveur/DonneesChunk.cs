@@ -22,12 +22,10 @@ public partial class DonneesChunk : RefCounted
 	public float[] DensitiesFlat;
 	public float[] DensitiesEauFlat;
 
-	/// <summary>Chemin binaire pour sauvegarde/chargement des chunks. Utilise GameState.NomMondeActuel.</summary>
+	/// <summary>Chemin binaire pour sauvegarde/chargement. TOUJOURS user://saves/{NomMondeActuel}/chunks/.</summary>
 	public static string ObtenirCheminChunk(Vector2I coord)
 	{
-		string nom = "MonMonde";
-		if (Engine.HasSingleton("GameState") && Engine.GetSingleton("GameState") is GameState gs)
-			nom = gs.NomMondeActuel ?? nom;
+		string nom = GameState.Instance?.NomMondeActuel ?? "MonMonde";
 		return $"user://saves/{nom}/chunks/chunk_{coord.X}_{coord.Y}.bin";
 	}
 

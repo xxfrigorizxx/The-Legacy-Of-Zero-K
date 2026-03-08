@@ -68,10 +68,9 @@ public partial class Monde_Serveur : Node
 		_onVoxelModifie = onVoxelModifie;
 		_onOrdonnerDestructionChunk = onOrdonnerDestructionChunk;
 		_obtenirPositionJoueur = obtenirPositionJoueur;
-		string nom = "MonMonde";
-		if (Engine.HasSingleton("GameState") && Engine.GetSingleton("GameState") is GameState gs)
-			nom = gs.NomMondeActuel ?? nom;
+		string nom = GameState.Instance?.NomMondeActuel ?? "MonMonde";
 		DirAccess.MakeDirRecursiveAbsolute($"user://saves/{nom}/chunks");
+		GD.Print($"ZERO-K : Dossier chunks actif = user://saves/{nom}/chunks/ (lecture ET écriture)");
 	}
 
 	/// <summary>Sauvegarde d'urgence : sauvegarde uniquement les chunks modifiés (EstModifie).</summary>
