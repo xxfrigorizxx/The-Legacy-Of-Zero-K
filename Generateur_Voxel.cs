@@ -14,7 +14,7 @@ public partial class Generateur_Voxel : Node3D
 
 	private const int TAILLE_MAX_SECTION = 17 * 17 * 17;
 	[Export] public int TailleChunk = 16;
-	[Export] public int HauteurMax = 512;  // Montagnes jusqu'à ~500
+	[Export] public int HauteurMax = 720;  // Montagnes jusqu'à 700
 	[Export] public float EchelleBruit = 0.03f;
 	[Export] public float AmplitudeBruit = 35.0f;
 	[Export] public int SeedTerrain = 19847;
@@ -26,7 +26,7 @@ public partial class Generateur_Voxel : Node3D
 	private const int NB_SECTIONS = 16;
 
 	// Constantes de la nouvelle ère (hauteurs relatives)
-	private int NiveauEau = 102;           // Océan à Y=102
+	private int NiveauEau = 103;           // Océan à Y=103 (+1 m)
 	private int ProfondeurBase = 104;     // Socle continental (légèrement au-dessus de l'eau)
 	private int AmplitudeMontagne = 396;  // Max ~500 (très rare en haut)
 
@@ -363,15 +363,21 @@ public partial class Generateur_Voxel : Node3D
 		_noiseErosion.FractalOctaves = 5;
 		_noiseErosion.Frequency = 0.002f;
 
+		// Température : Fbm + octaves = transitions lentes, zones climatiques étendues
 		_noiseTemperature = new FastNoiseLite();
 		_noiseTemperature.NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin;
 		_noiseTemperature.Seed = SeedTerrain + 2;
-		_noiseTemperature.Frequency = 0.001f;
+		_noiseTemperature.FractalType = FastNoiseLite.FractalTypeEnum.Fbm;
+		_noiseTemperature.FractalOctaves = 4;
+		_noiseTemperature.Frequency = 0.0005f;  // Zones larges = transitions douces
 
+		// Humidité : idem, plusieurs stades avec variation progressive
 		_noiseHumidite = new FastNoiseLite();
 		_noiseHumidite.Seed = SeedTerrain + 3;
 		_noiseHumidite.NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin;
-		_noiseHumidite.Frequency = 0.0012f;
+		_noiseHumidite.FractalType = FastNoiseLite.FractalTypeEnum.Fbm;
+		_noiseHumidite.FractalOctaves = 4;
+		_noiseHumidite.Frequency = 0.0006f;  // Légèrement différent de temp = biomes variés
 
 		// CERVEAU SOUTERRAIN (Creuse le réseau de grottes) — ne doit JAMAIS influencer la surface
 		_noiseCavernes = new FastNoiseLite();
@@ -691,27 +697,43 @@ public partial class Generateur_Voxel : Node3D
 		noiseRivieres.Frequency = 0.003f;
 		noiseRivieres.Seed = seed + 5;
 
-		const int ProfondeurBase = 104;
-		const int AmplitudeMontagne = 396;
-
 		float bruitBrut = noiseSurface.GetNoise2D(worldX, worldZ);
 		float bruitNormalise = (bruitBrut + 1.0f) / 2.0f;
-		float relief = Mathf.Pow(bruitNormalise, 5.0f);  // Exposant 5 : plus c'est haut, plus c'est rare
+		float relief = Mathf.Pow(bruitNormalise, 3.0f);
 
-		if (relief < 0.05f)
-			relief = 0.0f;
-		else
-			relief = relief - 0.05f;
+		// Plaine : plaines basses 103-105 (biais fort vers 103) + plaine principale 105-118
+		float bruitPlaine = noiseSurface.GetNoise2D(worldX * 0.0003f, worldZ * 0.0003f);
+		float bruitVague = noiseSurface.GetNoise2D(worldX * 0.0012f + 3000f, worldZ * 0.0012f + 3000f);
+		float bruitMicro = noiseSurface.GetNoise2D(worldX * 0.005f + 5000f, worldZ * 0.005f + 5000f);
+		float mix = (bruitPlaine + 1f) * 0.5f * 0.4f + (bruitVague + 1f) * 0.5f * 0.35f + (bruitMicro + 1f) * 0.5f * 0.25f;
+		mix = Mathf.Clamp(mix, 0f, 1f);
+		float rampBase;
+		if (mix < 0.6f) {
+			float t = mix / 0.6f;
+			rampBase = 103f + t * t * t * 2f;  // t³ : plus de temps à 103, peu à 105
+		} else {
+			float t = (mix - 0.6f) / 0.4f;
+			rampBase = 105f + t * 13f;  // Plaine principale 105 → 118
+		}
 
-		int hauteurBase = ProfondeurBase + (int)(relief * AmplitudeMontagne);
+		// Tier 2 + Montagnes : relief 0.09→0.42 (tier2), 0.42→1.0 (montagnes). % : plaine ~45%, tier2 ~30%, montagnes ~25%
+		float tTier2 = Mathf.Clamp((relief - 0.09f) / 0.33f, 0f, 1f);
+		float tMont = Mathf.Clamp((relief - 0.42f) / 0.58f, 0f, 1f);
+		float hTier2 = tTier2 * tTier2 * 82f;
+		float hMontagnes = tMont * tMont * 500f;  // Montagnes jusqu'à 700
+
+		// Transition progressive base → tier2+montagnes (blend 0.05 → 0.20)
+		float poidsBase = 1f - Mathf.Clamp((relief - 0.05f) / 0.15f, 0f, 1f);
+		poidsBase = poidsBase * poidsBase * (3f - 2f * poidsBase);
+		float hauteurHaut = 118f + hTier2 + hMontagnes;
+		int hauteurBase = (int)(rampBase * poidsBase + hauteurHaut * (1f - poidsBase));
 		float crevasseBrute = noiseRivieres.GetNoise2D(worldX, worldZ);
 		int profondeurEau = 0;
-
-		if (crevasseBrute > 0.15f)
+		if (crevasseBrute > 0.12f)
 		{
-			float intensiteRiviera = (crevasseBrute - 0.15f) / 0.85f;
-			float penteDouce = Mathf.Pow(intensiteRiviera, 0.8f);
-			profondeurEau = (int)(penteDouce * 22.0f);
+			float intensiteRiviera = (crevasseBrute - 0.12f) / 0.88f;
+			float tSmooth = intensiteRiviera * intensiteRiviera * (3f - 2f * intensiteRiviera);  // Descente très douce vers l'eau
+			profondeurEau = (int)(tSmooth * 22.0f);
 		}
 
 		return hauteurBase - profondeurEau;
@@ -720,75 +742,88 @@ public partial class Generateur_Voxel : Node3D
 	/// <summary>x et z doivent être en espace GLOBAL (worldX, worldZ) pour éviter le tiling.</summary>
 	private int CalculerHauteurTerrain(int xGlobal, int zGlobal)
 	{
-		// --- 1. LE SOCLE TECTONIQUE (Plaines vs Montagnes) ---
+		// --- 1. LE SOCLE TECTONIQUE (Plaines → Collines → Petites montagnes → Grandes montagnes) ---
 		float bruitBrut = _noiseSurface.GetNoise2D(xGlobal, zGlobal);
-		float bruitNormalise = (bruitBrut + 1.0f) / 2.0f; // Ramené de 0.0 à 1.0
+		float bruitNormalise = (bruitBrut + 1.0f) / 2.0f;
 
-		// Exposant à 5.0 : plus c'est haut, plus c'est rare (max ~500)
-		float relief = Mathf.Pow(bruitNormalise, 5.0f);
+		float relief = Mathf.Pow(bruitNormalise, 3.0f);  // Exposant 3 : plus de collines et montagnes
 
-		// LISSAGE DYNAMIQUE ABSOLU (Flatland Threshold)
-		// Les premiers 5% de l'élévation sont écrasés pour créer des plaines parfaites
-		if (relief < 0.05f)
-		{
-			relief = 0.0f;
+		// Plaine : plaines basses 103-105 (biais fort vers 103) + plaine principale 105-118
+		float bruitPlaine = _noiseErosion.GetNoise2D(xGlobal * 0.0003f, zGlobal * 0.0003f);
+		float bruitVague = _noiseErosion.GetNoise2D(xGlobal * 0.0012f + 3000f, zGlobal * 0.0012f + 3000f);
+		float bruitMicro = _noiseErosion.GetNoise2D(xGlobal * 0.005f + 5000f, zGlobal * 0.005f + 5000f);
+		float mix = (bruitPlaine + 1f) * 0.5f * 0.4f + (bruitVague + 1f) * 0.5f * 0.35f + (bruitMicro + 1f) * 0.5f * 0.25f;
+		mix = Mathf.Clamp(mix, 0f, 1f);
+		float rampBase;
+		if (mix < 0.6f) {
+			float t = mix / 0.6f;
+			rampBase = 103f + t * t * t * 2f;  // t³ : plus de temps à 103, peu à 105
+		} else {
+			float t = (mix - 0.6f) / 0.4f;
+			rampBase = 105f + t * 13f;  // Plaine principale 105 → 118
 		}
-		else
-		{
-			relief = relief - 0.05f; // Transition douce pour éviter les murs verticaux
-		}
 
-		int hauteurBase = ProfondeurBase + (int)(relief * AmplitudeMontagne);
+		// Tier 2 + Montagnes : plaine ~45%, tier2 ~30%, montagnes ~25%
+		float tTier2 = Mathf.Clamp((relief - 0.09f) / 0.33f, 0f, 1f);
+		float tMont = Mathf.Clamp((relief - 0.42f) / 0.58f, 0f, 1f);
+		float hTier2 = tTier2 * tTier2 * 82f;
+		float hMontagnes = tMont * tMont * 500f;
+
+		// Transition progressive base → tier2+montagnes (blend 0.05 → 0.20)
+		float poidsBase = 1f - Mathf.Clamp((relief - 0.05f) / 0.15f, 0f, 1f);
+		poidsBase = poidsBase * poidsBase * (3f - 2f * poidsBase);
+		float hauteurHaut = 118f + hTier2 + hMontagnes;
+		int hauteurBase = (int)(rampBase * poidsBase + hauteurHaut * (1f - poidsBase));
 
 		// --- 2. L'ENDIGUEMENT HYDROLOGIQUE (Berges en pente douce) ---
 		float crevasseBrute = _noiseRivieres.GetNoise2D(xGlobal, zGlobal);
 		int profondeurEau = 0;
-
-		// SEUIL ÉLARGI : On commence l'érosion plus tôt (0.15 au lieu de 0.25)
-		// Cela donne à la Matrice l'espace physique pour dessiner une large plage de sable
-		// avant d'atteindre la profondeur de l'eau.
-		if (crevasseBrute > 0.15f)
+		if (crevasseBrute > 0.12f)
 		{
-			// Normalisation de l'intensité (de 0.0 à 1.0)
-			float intensiteRiviera = (crevasseBrute - 0.15f) / 0.85f;
-
-			// LA COURBE DE L'ÉROSION (Fin du mur vertical)
-			// Une courbe de puissance légère (0.8) permet au terrain de descendre doucement
-			// sur les bords, puis de plonger profondément au centre du fleuve.
-			float penteDouce = Mathf.Pow(intensiteRiviera, 0.8f);
-
-			// On creuse progressivement de 0 jusqu'à 22 blocs de profondeur.
-			// La descente : 104 (Plaine) -> 103 -> 102 (Sable sec) -> 101 -> 100 (Eau)
-			profondeurEau = (int)(penteDouce * 22.0f);
+			float intensiteRiviera = (crevasseBrute - 0.12f) / 0.88f;
+			float tSmooth = intensiteRiviera * intensiteRiviera * (3f - 2f * intensiteRiviera);  // Descente très douce vers l'eau
+			profondeurEau = (int)(tSmooth * 22.0f);
 		}
 
 		// --- 3. RENDU FINAL ---
 		return hauteurBase - profondeurEau;
 	}
 
-	private const int NiveauPlage = 102;
-	private const int SeuilNeigeBase = 205;
+	private const int NiveauPlage = 102;  // Sable jusqu'à 102, herbe à 103-104 (niveau eau inchangé)
+	private const int SeuilNeigeBase = 200;  // Neige à partir de 200, transition organique avec bruit
 
 	private byte DeterminerMateriauCroûte(float globalX, float globalZ, int globalY, int hauteurSurface, float temperature, float humidite)
 	{
-		// Neige à partir de 205 avec bruit naturel (variation locale de la limite des neiges)
+		// Neige à partir de 200 avec bruit organique (±18) — transition naturelle, pas de ligne droite
 		float bruitNeige = _noiseNeige.GetNoise2D(globalX, globalZ);
-		int seuilLocal = SeuilNeigeBase + (int)(bruitNeige * 12f);
+		int seuilLocal = SeuilNeigeBase + (int)(bruitNeige * 18f);
 		if (globalY >= seuilLocal) return 5;  // NEIGE
-		// Plage : sable/boue au bord de l'eau (seuil fixe pour rester réaliste)
-		if (globalY <= NiveauPlage)
-			return (humidite > 0.3f) ? (byte)7 : (byte)3; // Boue ou Sable
-		if (temperature > 0.3f)
+		if (globalY <= NiveauPlage) return (humidite > 0.2f) ? (byte)7 : (byte)3;  // Plage : seuil doux
+		// Sable UNIQUEMENT quand très sec ET très chaud (temp + humidité liés logiquement)
+		if (temperature > 0.5f && humidite < -0.5f) return 3;  // Désert : sable
+		// Plusieurs stades temp/hum avec seuils progressifs (transitions lentes)
+		if (temperature > 0.4f)  // Très chaud
 		{
-			if (humidite < -0.2f) return 3;
-			if (humidite > 0.3f) return 8;
-			return 6;
+			if (humidite > 0.4f) return 8;   // Argile humide
+			if (humidite > 0.1f) return 6;   // Terre aride
+			return 1;   // Sec mais pas assez pour sable → herbe jaunâtre (shader)
 		}
-		if (temperature < -0.3f)
-			return (humidite > 0.2f) ? (byte)9 : (byte)5;
-		if (humidite < -0.3f) return 6;
-		if (humidite > 0.3f) return 7;
-		return 1;
+		if (temperature > 0.15f)  // Chaud
+		{
+			if (humidite > 0.35f) return 8;
+			if (humidite > 0.0f) return 6;
+			return 1;   // Sec → herbe (shader jaunâtre)
+		}
+		if (temperature < -0.4f) return 5;  // Très froid = toujours neige
+		if (temperature < -0.15f)  // Froid
+			return (humidite > 0.2f) ? (byte)9 : (byte)5;  // Glace si humide, neige sinon
+		// Tempéré / Frais : humide → boue, sec → roche, entre-deux → herbe
+		if (humidite < -0.35f) return 6;   // Très sec
+		if (humidite < -0.15f) return 1;   // Sec : herbe
+		if (humidite > 0.4f) return 7;     // Très humide : boue
+		if (humidite > 0.2f) return 7;    // Humide : boue
+		if (humidite > 0.05f) return 1;   // Légèrement humide : herbe
+		return 1;  // Herbe par défaut
 	}
 
 	public void GenererBruitVierge()
@@ -916,12 +951,16 @@ public partial class Generateur_Voxel : Node3D
 		var noiseTemperature = new FastNoiseLite();
 		noiseTemperature.NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin;
 		noiseTemperature.Seed = seed + 2;
-		noiseTemperature.Frequency = 0.001f;
+		noiseTemperature.FractalType = FastNoiseLite.FractalTypeEnum.Fbm;
+		noiseTemperature.FractalOctaves = 4;
+		noiseTemperature.Frequency = 0.0005f;  // Zones larges = transitions douces
 
 		var noiseHumidite = new FastNoiseLite();
 		noiseHumidite.Seed = seed + 3;
 		noiseHumidite.NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin;
-		noiseHumidite.Frequency = 0.0012f;
+		noiseHumidite.FractalType = FastNoiseLite.FractalTypeEnum.Fbm;
+		noiseHumidite.FractalOctaves = 4;
+		noiseHumidite.Frequency = 0.0006f;  // Légèrement différent de temp = biomes variés
 
 		var noiseCavernes = new FastNoiseLite();
 		noiseCavernes.NoiseType = FastNoiseLite.NoiseTypeEnum.Cellular;
@@ -935,8 +974,8 @@ public partial class Generateur_Voxel : Node3D
 		noiseNeige.Seed = seed + 10;
 		noiseNeige.Frequency = 0.008f;
 
-		const int NiveauEau = 102;
-		const int SeuilNeigeBase = 205;
+		const int NiveauEau = 103;  // +1 m
+		const int SeuilNeigeBase = 200;  // Neige à 200, transition organique
 
 		var densities = new float[tailleChunk + 1, hauteurMax + 1, tailleChunk + 1];
 		var materials = new byte[tailleChunk + 1, hauteurMax + 1, tailleChunk + 1];
@@ -1016,23 +1055,34 @@ public partial class Generateur_Voxel : Node3D
 
 	private static byte DeterminerMateriauCroûteStatique(float globalX, float globalZ, int globalY, int hauteurSurface, float temperature, float humidite, FastNoiseLite noiseNeige, int seuilNeigeBase)
 	{
-		const int NiveauPlage = 102; // Seuil sable fixe
-		// Neige à partir de 205 avec bruit naturel (variation locale de la limite des neiges)
+		const int NiveauPlage = 102;  // Sable jusqu'à 102, herbe à 103-104
 		float bruitNeige = noiseNeige.GetNoise2D(globalX, globalZ);
-		int seuilLocal = seuilNeigeBase + (int)(bruitNeige * 12f);
+		int seuilLocal = seuilNeigeBase + (int)(bruitNeige * 18f);  // Bruit organique ±18
 		if (globalY >= seuilLocal) return 5;  // NEIGE
-		if (globalY <= NiveauPlage)
-			return (humidite > 0.3f) ? (byte)7 : (byte)3;
-		if (temperature > 0.3f)
+		if (globalY <= NiveauPlage) return (humidite > 0.2f) ? (byte)7 : (byte)3;
+		// Sable UNIQUEMENT quand très sec ET très chaud (temp + humidité liés)
+		if (temperature > 0.5f && humidite < -0.5f) return 3;  // Désert : sable
+		// Plusieurs stades temp/hum avec seuils progressifs (transitions lentes)
+		if (temperature > 0.4f)  // Très chaud
 		{
-			if (humidite < -0.2f) return 3;
-			if (humidite > 0.3f) return 8;
+			if (humidite > 0.4f) return 8;
+			if (humidite > 0.1f) return 6;
+			return 1;   // Sec → herbe jaunâtre (shader)
+		}
+		if (temperature > 0.15f)  // Chaud
+		{
+			if (humidite < -0.4f) return 1;  // Sec → herbe (shader jaunâtre)
+			if (humidite > 0.35f) return 8;
+			if (humidite > 0.0f) return 6;
 			return 6;
 		}
-		if (temperature < -0.3f)
-			return (humidite > 0.2f) ? (byte)9 : (byte)5;
-		if (humidite < -0.3f) return 6;
-		if (humidite > 0.3f) return 7;
+		if (temperature < -0.4f) return 5;  // Très froid = toujours neige
+		if (temperature < -0.15f) return (humidite > 0.2f) ? (byte)9 : (byte)5;  // Glace si humide, neige sinon
+		if (humidite < -0.35f) return 6;
+		if (humidite < -0.15f) return 1;
+		if (humidite > 0.4f) return 7;
+		if (humidite > 0.2f) return 7;
+		if (humidite > 0.05f) return 1;
 		return 1;
 	}
 

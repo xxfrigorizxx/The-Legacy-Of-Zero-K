@@ -98,15 +98,20 @@ public partial class Chunk_Client : Node3D
 
 	public void ConfigurerBruitClimat(int seed)
 	{
+		// Aligné avec serveur : Fbm + octaves = transitions lentes pour couleurs cohérentes
 		_noiseTemperature = new FastNoiseLite();
 		_noiseTemperature.NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin;
 		_noiseTemperature.Seed = seed + 2;
-		_noiseTemperature.Frequency = 0.001f;
+		_noiseTemperature.FractalType = FastNoiseLite.FractalTypeEnum.Fbm;
+		_noiseTemperature.FractalOctaves = 4;
+		_noiseTemperature.Frequency = 0.0005f;
 
 		_noiseHumidite = new FastNoiseLite();
 		_noiseHumidite.Seed = seed + 3;
 		_noiseHumidite.NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin;
-		_noiseHumidite.Frequency = 0.0012f;
+		_noiseHumidite.FractalType = FastNoiseLite.FractalTypeEnum.Fbm;
+		_noiseHumidite.FractalOctaves = 4;
+		_noiseHumidite.Frequency = 0.0006f;
 	}
 
 	/// <summary>Reçoit les données du serveur. Stocke _densities/_materials en RAM AVANT toute construction visuelle. Meshes en goutte-à-goutte (MaxMeshesParFrame) pour éviter Upload Stall VRAM.</summary>
@@ -455,10 +460,13 @@ public partial class Chunk_Client : Node3D
 		float temp = _noiseTemperature.GetNoise2D(xGlobal, zGlobal);
 		float hum = _noiseHumidite.GetNoise2D(xGlobal, zGlobal);
 		float facteurHum = Mathf.Clamp((hum + 1f) * 0.5f, 0f, 1f);
-		float accentue = facteurHum < 0.2f ? 0f : (facteurHum > 0.8f ? 1f : (facteurHum - 0.2f) / 0.6f);
-		Color sec = new Color(1.5f, 0.85f, 0.25f);
-		Color humide = new Color(0.35f, 1.15f, 0.45f);
-		Color couleurBase = sec.Lerp(humide, accentue);
+		// Gazon 3D : sec = jaunâtre, normal = vert, humide = vert foncé (comme shader terrain)
+		Color sec = new Color(1.3f, 0.9f, 0.35f);
+		Color normal = new Color(0.45f, 0.75f, 0.4f);
+		Color humide = new Color(0.25f, 0.55f, 0.3f);
+		Color couleurBase = facteurHum < 0.35f
+			? sec.Lerp(normal, facteurHum / 0.35f)
+			: normal.Lerp(humide, (facteurHum - 0.35f) / 0.65f);
 		return couleurBase;
 	}
 

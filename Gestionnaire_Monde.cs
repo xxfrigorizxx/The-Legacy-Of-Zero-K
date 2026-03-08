@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 public partial class Gestionnaire_Monde : Node3D
 {
 	[Export] public int TailleChunk = 16;
-	[Export] public int HauteurMax = 512;  // Montagnes jusqu'à ~500
+	[Export] public int HauteurMax = 720;  // Montagnes jusqu'à 700
 	[Export] public int SeedTerrain = 19847;
 	[Export] public int RenderDistance = 200;
 	[Export] public int MaxChunksParFrame = 4;
@@ -166,11 +166,22 @@ public partial class Gestionnaire_Monde : Node3D
 		AddChild(canvas);
 		canvas.AddChild(panel);
 
+		// Position : chargée si monde existant, sinon spawn par défaut (terrain généré → joueur déposé)
 		Vector3 posSpawn = _joueur.GlobalPosition;
-		int hauteurTerrain = Generateur_Voxel.ObtenirHauteurTerrainMonde((int)posSpawn.X, (int)posSpawn.Z, SeedTerrain);
-		float ySpawn = hauteurTerrain + 20f;
-		if (hauteurTerrain < 102) ySpawn = Mathf.Max(ySpawn, 122f);
-		_joueur.GlobalPosition = new Vector3(posSpawn.X, ySpawn, posSpawn.Z);
+		var posSauvegardee = GameState.Instance?.ObtenirPositionJoueurSauvegardee();
+		if (posSauvegardee.HasValue)
+		{
+			posSpawn = posSauvegardee.Value;
+			GD.Print($"ZERO-K : Joueur reconnecté à {posSpawn}");
+		}
+		else
+		{
+			int hauteurTerrain = Generateur_Voxel.ObtenirHauteurTerrainMonde((int)posSpawn.X, (int)posSpawn.Z, SeedTerrain);
+			float ySpawn = hauteurTerrain + 40f;  // Spawn plus haut (terrain généré d'abord, gravité suspendue jusqu'à collision)
+			if (hauteurTerrain < 103) ySpawn = Mathf.Max(ySpawn, 142f);
+			posSpawn = new Vector3(posSpawn.X, ySpawn, posSpawn.Z);
+		}
+		_joueur.GlobalPosition = posSpawn;
 
 		if (UseArchitectureReseau)
 		{
@@ -200,6 +211,8 @@ public partial class Gestionnaire_Monde : Node3D
 	{
 		if (what == Node.NotificationWMCloseRequest)
 		{
+			if (_joueur != null)
+				GameState.Instance?.SauvegarderPositionJoueur(_joueur.GlobalPosition);
 			if (UseArchitectureReseau)
 				_mondeServeur?.SauvegarderMondeEntier();
 			else
@@ -211,6 +224,9 @@ public partial class Gestionnaire_Monde : Node3D
 
 	public override void _ExitTree()
 	{
+		// Sauvegarde position joueur (reconnexion au même endroit)
+		if (_joueur != null)
+			GameState.Instance?.SauvegarderPositionJoueur(_joueur.GlobalPosition);
 		// RÈGLE ABSOLUE : sauvegarde des chunks modifiés AVANT destruction (parent _ExitTree avant enfants).
 		if (UseArchitectureReseau)
 			_mondeServeur?.SauvegarderMondeEntier();
@@ -251,6 +267,8 @@ public partial class Gestionnaire_Monde : Node3D
 		var btnSave = new Button { Text = "Sauvegarder" };
 		btnSave.Pressed += () =>
 		{
+			if (_joueur != null)
+				GameState.Instance?.SauvegarderPositionJoueur(_joueur.GlobalPosition);
 			_mondeServeur?.SauvegarderMondeEntier();
 			GD.Print("ZERO-K : Sauvegarde manuelle effectuée.");
 		};
@@ -489,13 +507,14 @@ public partial class Gestionnaire_Monde : Node3D
 			return 2; // ID 2 = Roche
 
 		// Règle 2 : Le niveau de la mer (Le Sable)
-		const float NIVEAU_EAU = 102f; // Aligné avec NiveauPlage du terrain
+		const float NIVEAU_EAU = 103f; // Aligné avec NiveauPlage du terrain (+1 m)
 		if (altitude < NIVEAU_EAU + 2.0f && altitude >= NIVEAU_EAU - 5.0f)
 			return 3; // ID 3 = Sable
 
-		// Règle 3 : Les hauts sommets (La Neige) — seuil 205 avec variation naturelle en jeu
-		const float NIVEAU_NEIGE = 205f;
-		if (altitude > NIVEAU_NEIGE)
+		// Règle 3 : Les hauts sommets (La Neige) — seuil 200 avec variation organique (±18)
+		int bruit = (int)((positionGlobale.X * 73856093 + positionGlobale.Z * 19349663) % 37) - 18;
+		float seuilNeige = 200f + bruit;
+		if (altitude > seuilNeige)
 			return 4; // ID 4 = Neige (atlas livre)
 
 		// Par défaut : plat et altitude moyenne

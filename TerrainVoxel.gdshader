@@ -61,24 +61,32 @@ void fragment() {
 	float macro_noise = noise(world_pos.xz * 0.05);
 	vec3 final_color = albedo_tex.rgb * (0.65 + macro_noise * 0.5); // Modulation de la luminosité
 
-	// --- MUTATION SÉMANTIQUE (FERTILITÉ & CLIMAT) — INTENSIFIÉE —---
+	// --- MUTATION SÉMANTIQUE (FERTILITÉ & CLIMAT) —---
 	float facteur_humidite = clamp((v_humidite + 1.0) * 0.5, 0.0, 1.0);
-	// Courbe accentuée : les extrêmes (sec/humide) ressortent davantage
-	float facteur_accentue = smoothstep(0.2, 0.8, facteur_humidite);
 
-	// Si nous sommes sur de l'Herbe (ID 1)
+	// Herbe (ID 1) : sec = jaunâtre, normal = vert, humide = vert foncé
 	if (material_id == 1.0) {
-		// Sec : paille brûlée / jaune terne — Humide : vert profond luxuriant
-		vec3 couleur_seche = vec3(1.5, 0.85, 0.25);  // Orange/jaune brûlé très visible
-		vec3 couleur_humide = vec3(0.35, 1.15, 0.45); // Vert saturé, marais
-		vec3 teinte_flore = mix(couleur_seche, couleur_humide, facteur_accentue);
+		vec3 couleur_seche = vec3(1.3, 0.9, 0.35);   // Jaunâtre / paille
+		vec3 couleur_normal = vec3(0.45, 0.75, 0.4); // Vert normal
+		vec3 couleur_humide = vec3(0.25, 0.55, 0.3); // Vert foncé
+		vec3 teinte_flore;
+		if (facteur_humidite < 0.35) teinte_flore = mix(couleur_seche, couleur_normal, facteur_humidite / 0.35);
+		else teinte_flore = mix(couleur_normal, couleur_humide, (facteur_humidite - 0.35) / 0.65);
 		final_color *= teinte_flore;
 	}
-	// Si nous sommes sur de la Terre Aride (ID 6) ou de la Boue (ID 7)
-	if (material_id == 6.0 || material_id == 7.0) {
-		// Humide = beaucoup plus sombre (0.35 au lieu de 0.5)
-		float assombrissement = mix(1.0, 0.35, facteur_accentue);
-		final_color *= vec3(assombrissement);
+	// Boue (ID 7) : sec = grisâtre, humide = de plus en plus brun
+	if (material_id == 7.0) {
+		vec3 gris_sec = vec3(0.7, 0.68, 0.65);   // Grisâtre
+		vec3 brun_humide = vec3(0.45, 0.32, 0.22); // Brun
+		vec3 teinte_boue = mix(gris_sec, brun_humide, facteur_humidite);
+		final_color *= teinte_boue;
+	}
+	// Terre aride (ID 6) : sec = grisâtre, humide = assombri
+	if (material_id == 6.0) {
+		float assombrissement = mix(1.0, 0.5, facteur_humidite);
+		vec3 gris_sec = vec3(0.95, 0.9, 0.85);
+		vec3 brun = vec3(0.6, 0.5, 0.4);
+		final_color *= mix(gris_sec, brun, facteur_humidite * 0.7);
 	}
 
 	ALBEDO = final_color;

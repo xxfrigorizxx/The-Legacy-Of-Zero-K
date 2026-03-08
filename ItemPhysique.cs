@@ -84,7 +84,7 @@ public partial class ItemPhysique : Node3D
 
 		if (estSilex)
 		{
-			var primitive = new PrismMesh { Size = new Vector3(0.2f, 0.15f, 0.25f) };
+			var primitive = new SphereMesh { Radius = 0.12f, Height = 0.24f }; // Forme de base sphère (déformation inchangée)
 			arrayMesh = new ArrayMesh();
 			arrayMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, primitive.GetMeshArrays());
 			forceDeformation = 0.3f;

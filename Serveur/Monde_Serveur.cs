@@ -10,7 +10,7 @@ using FileAccess = Godot.FileAccess;
 public partial class Monde_Serveur : Node
 {
 	[Export] public int TailleChunk = 16;
-	[Export] public int HauteurMax = 512;  // Montagnes jusqu'à ~500
+	[Export] public int HauteurMax = 720;  // Montagnes jusqu'à 700
 	[Export] public int SeedTerrain = 19847;
 	[Export] public int RayonMondeChunks = 1000;
 	[Export] public int RenderDistance = 200;
@@ -85,6 +85,7 @@ public partial class Monde_Serveur : Node
 			if (chunk.EstModifie)
 			{
 				chunk.SauvegarderChunkSurDisque();
+				SauvegarderPierresChunk(coord);
 				chunksSauves++;
 			}
 		}
@@ -190,8 +191,10 @@ public partial class Monde_Serveur : Node
 					continue;
 				}
 
-				// BRANCHE COMMUNE : Chunk ressuscité — envoi direct, AUCUNE passe de décoration.
+				// BRANCHE COMMUNE : Chunk ressuscité — envoi direct. Pierres : chargement sauvegardées ou ensemencement.
 				_chunks[chunkCible] = chunkActuel;
+				if (!ChargerEtSpawnerPierresChunk(chunkCible))
+					DeclencherEnsemencement(chunkCible, chunkActuel, TailleChunk);
 				_fileEnvoiReseau.Enqueue(new ColisChunk { Coord = chunkCible, Donnees = chunkActuel.ObtenirDonneesPourClient() });
 			}
 		}
@@ -383,8 +386,8 @@ public partial class Monde_Serveur : Node
 		bloc.GlobalPosition = pos;
 	}
 
-	private const float NIVEAU_EAU = 102f;
-	private const float DECALAGE_SPAWN_VERTICAL = 0.5f; // Évite l'encastrement : l'objet tombe au lieu de s'enfoncer
+	private const float NIVEAU_EAU = 103f;  // +1 m
+	private const float DECALAGE_SPAWN_VERTICAL = 1.2f; // Légèrement au-dessus du terrain à la génération, tombe quand réveillé
 	/// <summary>Rayon en chunks : pierres gelées s'activent quand le joueur entre dans cette zone (comme le gazon). Chunk garanti chargé.</summary>
 	private const int RAYON_ACTIVATION_PIERRES_CHUNKS = 2;
 	private const int ID_PETITE_PIERRE = 10;
@@ -434,14 +437,16 @@ public partial class Monde_Serveur : Node
 					continue;
 				}
 
-				// Filtre géologique des pierres
+				// Filtre géologique des pierres : spawn sur tous les 4 tiers (plaine, tier2, montagnes, neige)
 				int idTailleChoisie = 0;
 				float proba = rng.Randf();
-				if (idMatiere == 1 || idMatiere == 3) // Terre, Sable
+				if (idMatiere == 1 || idMatiere == 3) // Terre, Sable (plaine)
 					idTailleChoisie = ID_PETITE_PIERRE;
-				else if (idMatiere == 7 || idMatiere == 8) // Boue, Argile
+				else if (idMatiere == 7 || idMatiere == 8) // Boue, Argile (plaine humide)
 					idTailleChoisie = (proba > 0.4f) ? ID_PETITE_PIERRE : ID_PIERRE_MOYENNE;
-				else if (idMatiere == 2) // Roche pure
+				else if (idMatiere == 5 || idMatiere == 6) // Neige, Terre aride (tous les tiers)
+					idTailleChoisie = (proba > 0.5f) ? ID_PETITE_PIERRE : ID_PIERRE_MOYENNE;
+				else if (idMatiere == 2) // Roche pure (montagnes)
 				{
 					if (proba < 0.40f) idTailleChoisie = ID_PETITE_PIERRE;
 					else if (proba < 0.70f) idTailleChoisie = ID_PIERRE_MOYENNE;
@@ -494,7 +499,7 @@ public partial class Monde_Serveur : Node
 	/// <summary>Rayon en unités : pierres gelées se réveillent quand joueur entre (2 chunks = terrain chargé).</summary>
 	private float RayonActivationPierres => RAYON_ACTIVATION_PIERRES_CHUNKS * TailleChunk;
 
-	/// <summary>Dégèle les RigidBody3D pierres (IDs 10,12,13,14) quand le joueur est dans le rayon. Chunk garanti chargé.</summary>
+	/// <summary>Réveille les pierres dans le rayon, endort immédiatement celles hors rayon ou qui se sont mises en sommeil physique.</summary>
 	private void ReveillerPierresDansRayon()
 	{
 		if (_parentPourBlocsChutants == null || _obtenirPositionJoueur == null) return;
@@ -502,14 +507,103 @@ public partial class Monde_Serveur : Node
 		float rayonCarre = RayonActivationPierres * RayonActivationPierres;
 		foreach (Node child in _parentPourBlocsChutants.GetChildren())
 		{
-			if (child is not RigidBody3D rb || !rb.Freeze) continue;
+			if (child is not RigidBody3D rb) continue;
 			var item = rb.GetNodeOrNull<ItemPhysique>("ItemPhysique");
 			if (item == null) continue;
 			int id = item.ID_Objet;
 			if (id != ID_PETITE_PIERRE && id != ID_PIERRE_MOYENNE && id != ID_GROSSE_PIERRE && id != ID_TRES_GROSSE_PIERRE) continue;
-			if (rb.GlobalPosition.DistanceSquaredTo(posJoueur) <= rayonCarre)
+			float distCarre = rb.GlobalPosition.DistanceSquaredTo(posJoueur);
+			if (distCarre <= rayonCarre)
 				rb.Freeze = false;
+			else
+				rb.Freeze = true; // Endormir immédiatement dès qu'il sort du rayon ou se simplifie (sommeil physique)
 		}
+	}
+
+	/// <summary>Sauvegarde les pierres et silex (IDs 10-14) dont la position est dans le chunk.</summary>
+	private void SauvegarderPierresChunk(Vector2I coord)
+	{
+		if (_parentPourBlocsChutants == null) return;
+		float xMin = coord.X * TailleChunk;
+		float xMax = (coord.X + 1) * TailleChunk;
+		float zMin = coord.Y * TailleChunk;
+		float zMax = (coord.Y + 1) * TailleChunk;
+		var pierres = new List<(Vector3 pos, int id)>();
+		foreach (Node child in _parentPourBlocsChutants.GetChildren())
+		{
+			var item = child.GetNodeOrNull<ItemPhysique>("ItemPhysique");
+			if (item == null) continue;
+			int id = item.ID_Objet;
+			if (id < 10 || id > 14) continue;
+			Vector3 pos = (child as Node3D)?.GlobalPosition ?? Vector3.Zero;
+			if (pos.X >= xMin && pos.X < xMax && pos.Z >= zMin && pos.Z < zMax)
+				pierres.Add((pos, id));
+		}
+		if (pierres.Count == 0) return;
+		string nom = GameState.Instance?.NomMondeActuel ?? "MonMonde";
+		string dossier = ProjectSettings.GlobalizePath($"user://saves/{nom}/chunks/");
+		Directory.CreateDirectory(dossier);
+		string chemin = Path.Combine(dossier, $"chunk_{coord.X}_{coord.Y}_items.bin");
+		try
+		{
+			using (var w = new BinaryWriter(File.Open(chemin, FileMode.Create)))
+			{
+				w.Write(pierres.Count);
+				foreach (var (pos, id) in pierres)
+				{
+					w.Write(pos.X); w.Write(pos.Y); w.Write(pos.Z);
+					w.Write((byte)id);
+				}
+			}
+		}
+		catch (Exception ex) { GD.PrintErr($"ZERO-K : Erreur sauvegarde pierres chunk {coord} : {ex.Message}"); }
+	}
+
+	/// <summary>Charge et spawn les pierres sauvegardées. Retourne true si fichier existait et a été chargé.</summary>
+	private bool ChargerEtSpawnerPierresChunk(Vector2I coord)
+	{
+		if (_parentPourBlocsChutants == null) return false;
+		string nom = GameState.Instance?.NomMondeActuel ?? "MonMonde";
+		string chemin = ProjectSettings.GlobalizePath($"user://saves/{nom}/chunks/chunk_{coord.X}_{coord.Y}_items.bin");
+		if (!File.Exists(chemin)) return false;
+		try
+		{
+			using (var r = new BinaryReader(File.Open(chemin, FileMode.Open, System.IO.FileAccess.Read, FileShare.Read)))
+			{
+				int count = r.ReadInt32();
+				for (int i = 0; i < count; i++)
+				{
+					float x = r.ReadSingle(), y = r.ReadSingle(), z = r.ReadSingle();
+					int id = r.ReadByte();
+					if (id >= 10 && id <= 14)
+						GenererItemPhysique(new Vector3(x, y, z), id);
+				}
+			}
+			return true;
+		}
+		catch (Exception ex) { GD.PrintErr($"ZERO-K : Erreur chargement pierres chunk {coord} : {ex.Message}"); return false; }
+	}
+
+	/// <summary>Retire du monde les pierres/silex dont la position est dans le chunk (évite doublons au rechargement).</summary>
+	private void RetirerPierresChunk(Vector2I coord)
+	{
+		if (_parentPourBlocsChutants == null) return;
+		float xMin = coord.X * TailleChunk;
+		float xMax = (coord.X + 1) * TailleChunk;
+		float zMin = coord.Y * TailleChunk;
+		float zMax = (coord.Y + 1) * TailleChunk;
+		var aRetirer = new List<Node>();
+		foreach (Node child in _parentPourBlocsChutants.GetChildren())
+		{
+			var item = child.GetNodeOrNull<ItemPhysique>("ItemPhysique");
+			if (item == null) continue;
+			if (item.ID_Objet < 10 || item.ID_Objet > 14) continue;
+			Vector3 pos = (child as Node3D)?.GlobalPosition ?? Vector3.Zero;
+			if (pos.X >= xMin && pos.X < xMax && pos.Z >= zMin && pos.Z < zMax)
+				aRetirer.Add(child);
+		}
+		foreach (var n in aRetirer)
+			n.QueueFree();
 	}
 
 	public void AppliquerDestructionGlobale(Vector3 pointImpact, float rayon, int peerDemandeur = -1)
@@ -683,7 +777,10 @@ public partial class Monde_Serveur : Node
 		{
 			if (_chunks.TryGetValue(coord, out var chunk))
 			{
-				if (chunk.EstModifie) chunk.SauvegarderChunkSurDisque(); // Drapeau : sauvegarde uniquement si touché par le joueur.
+				if (chunk.EstModifie)
+					chunk.SauvegarderChunkSurDisque();
+				SauvegarderPierresChunk(coord); // Toujours sauvegarder (pierres peuvent avoir bougé)
+				RetirerPierresChunk(coord);    // Retirer de la scène pour éviter doublons au rechargement
 				_chunks.Remove(coord);
 				_onOrdonnerDestructionChunk(coord);
 			}

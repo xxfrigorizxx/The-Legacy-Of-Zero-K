@@ -87,4 +87,43 @@ public partial class GameState : Node
 		using var writer = new BinaryWriter(File.Open(chemin, FileMode.Create));
 		writer.Write(seed);
 	}
+
+	/// <summary>Sauvegarde la position du joueur pour ce monde. Appelé à la déconnexion / quitter.</summary>
+	public void SauvegarderPositionJoueur(Vector3 pos)
+	{
+		string dossier = ProjectSettings.GlobalizePath($"user://saves/{NomMondeActuel}");
+		Directory.CreateDirectory(dossier);
+		string chemin = Path.Combine(dossier, "player.dat");
+		try
+		{
+			using var writer = new BinaryWriter(File.Open(chemin, FileMode.Create));
+			writer.Write(pos.X);
+			writer.Write(pos.Y);
+			writer.Write(pos.Z);
+		}
+		catch (Exception ex)
+		{
+			GD.PrintErr($"ZERO-K : Erreur sauvegarde position joueur : {ex.Message}");
+		}
+	}
+
+	/// <summary>Charge la position du joueur sauvegardée. Null si aucun fichier (nouveau monde).</summary>
+	public Vector3? ObtenirPositionJoueurSauvegardee()
+	{
+		string chemin = Path.Combine(ProjectSettings.GlobalizePath($"user://saves/{NomMondeActuel}"), "player.dat");
+		if (!File.Exists(chemin)) return null;
+		try
+		{
+			using var reader = new BinaryReader(File.Open(chemin, FileMode.Open, System.IO.FileAccess.Read, FileShare.Read));
+			float x = reader.ReadSingle();
+			float y = reader.ReadSingle();
+			float z = reader.ReadSingle();
+			return new Vector3(x, y, z);
+		}
+		catch (Exception ex)
+		{
+			GD.PrintErr($"ZERO-K : Erreur lecture position joueur : {ex.Message}");
+			return null;
+		}
+	}
 }
