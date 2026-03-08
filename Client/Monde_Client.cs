@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 public partial class Monde_Client : Node3D
 {
 	[Export] public int TailleChunk = 16;
-	[Export] public int HauteurMax = 256;
+	[Export] public int HauteurMax = 512;  // Montagnes jusqu'à ~500
 	[Export] public int RenderDistance = 200;
 	[Export] public int MaxChunksParFrame = 4;
 

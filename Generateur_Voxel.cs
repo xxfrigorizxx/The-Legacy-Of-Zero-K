@@ -14,7 +14,7 @@ public partial class Generateur_Voxel : Node3D
 
 	private const int TAILLE_MAX_SECTION = 17 * 17 * 17;
 	[Export] public int TailleChunk = 16;
-	[Export] public int HauteurMax = 256;
+	[Export] public int HauteurMax = 512;  // Montagnes jusqu'à ~500
 	[Export] public float EchelleBruit = 0.03f;
 	[Export] public float AmplitudeBruit = 35.0f;
 	[Export] public int SeedTerrain = 19847;
@@ -28,7 +28,7 @@ public partial class Generateur_Voxel : Node3D
 	// Constantes de la nouvelle ère (hauteurs relatives)
 	private int NiveauEau = 102;           // Océan à Y=102
 	private int ProfondeurBase = 104;     // Socle continental (légèrement au-dessus de l'eau)
-	private int AmplitudeMontagne = 100;  // Hauteur maximale des pics
+	private int AmplitudeMontagne = 396;  // Max ~500 (très rare en haut)
 
 	// [LEGACY] Remplacé par injection d'ID dans canal rouge pour shader triplanaire
 	// private static Color ObtenirCouleurMateriau(byte id) { ... }
@@ -39,6 +39,7 @@ public partial class Generateur_Voxel : Node3D
 	private FastNoiseLite _noiseHumidite;
 	private FastNoiseLite _noiseCavernes;
 	private FastNoiseLite _noiseRivieres;
+	private FastNoiseLite _noiseNeige;
 	private MeshInstance3D[] _sectionsTerrain;
 	private MeshInstance3D[] _sectionsEau;
 	private CollisionShape3D[] _sectionsPhysiques;
@@ -387,6 +388,11 @@ public partial class Generateur_Voxel : Node3D
 		_noiseRivieres.Frequency = 0.003f; // Fleuves longs et larges
 		_noiseRivieres.Seed = SeedTerrain + 5;
 
+		_noiseNeige = new FastNoiseLite();
+		_noiseNeige.NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin;
+		_noiseNeige.Seed = SeedTerrain + 10;
+		_noiseNeige.Frequency = 0.008f;  // Variation locale naturelle de la limite des neiges
+
 		_densitiesEau = new float[TailleChunk + 1, HauteurMax + 1, TailleChunk + 1];
 
 		var shaderEau = GD.Load<Shader>("res://EauTriplanar.gdshader");
@@ -686,11 +692,11 @@ public partial class Generateur_Voxel : Node3D
 		noiseRivieres.Seed = seed + 5;
 
 		const int ProfondeurBase = 104;
-		const int AmplitudeMontagne = 100;
+		const int AmplitudeMontagne = 396;
 
 		float bruitBrut = noiseSurface.GetNoise2D(worldX, worldZ);
 		float bruitNormalise = (bruitBrut + 1.0f) / 2.0f;
-		float relief = Mathf.Pow(bruitNormalise, 3.0f);
+		float relief = Mathf.Pow(bruitNormalise, 5.0f);  // Exposant 5 : plus c'est haut, plus c'est rare
 
 		if (relief < 0.05f)
 			relief = 0.0f;
@@ -718,8 +724,8 @@ public partial class Generateur_Voxel : Node3D
 		float bruitBrut = _noiseSurface.GetNoise2D(xGlobal, zGlobal);
 		float bruitNormalise = (bruitBrut + 1.0f) / 2.0f; // Ramené de 0.0 à 1.0
 
-		// Exposant à 3.0 : Aplatit radicalement les basses terres et étire les pics
-		float relief = Mathf.Pow(bruitNormalise, 3.0f);
+		// Exposant à 5.0 : plus c'est haut, plus c'est rare (max ~500)
+		float relief = Mathf.Pow(bruitNormalise, 5.0f);
 
 		// LISSAGE DYNAMIQUE ABSOLU (Flatland Threshold)
 		// Les premiers 5% de l'élévation sont écrasés pour créer des plaines parfaites
@@ -760,12 +766,15 @@ public partial class Generateur_Voxel : Node3D
 		return hauteurBase - profondeurEau;
 	}
 
-	private const int NiveauPlage = 102; // Seuil sable/boue (fixe, indépendant du niveau d'eau)
+	private const int NiveauPlage = 102;
+	private const int SeuilNeigeBase = 205;
 
-	private byte DeterminerMateriauCroûte(int globalY, int hauteurSurface, float temperature, float humidite)
+	private byte DeterminerMateriauCroûte(float globalX, float globalZ, int globalY, int hauteurSurface, float temperature, float humidite)
 	{
-		// Sommets (très haut par rapport à l'eau)
-		if (globalY > NiveauEau + 60) return 5; // NEIGE
+		// Neige à partir de 205 avec bruit naturel (variation locale de la limite des neiges)
+		float bruitNeige = _noiseNeige.GetNoise2D(globalX, globalZ);
+		int seuilLocal = SeuilNeigeBase + (int)(bruitNeige * 12f);
+		if (globalY >= seuilLocal) return 5;  // NEIGE
 		// Plage : sable/boue au bord de l'eau (seuil fixe pour rester réaliste)
 		if (globalY <= NiveauPlage)
 			return (humidite > 0.3f) ? (byte)7 : (byte)3; // Boue ou Sable
@@ -817,7 +826,7 @@ public partial class Generateur_Voxel : Node3D
 					}
 					else if (globalY == hauteurSurface)
 					{
-						_materials[x, y, z] = DeterminerMateriauCroûte((int)globalY, hauteurSurface, temperature, humidite);
+						_materials[x, y, z] = DeterminerMateriauCroûte(globalX, globalZ, (int)globalY, hauteurSurface, temperature, humidite);
 						_densities[x, y, z] = 10.0f;
 					}
 					else if (globalY < hauteurSurface && globalY >= hauteurSurface - 4)
@@ -921,7 +930,13 @@ public partial class Generateur_Voxel : Node3D
 		noiseCavernes.FractalOctaves = 3;
 		noiseCavernes.Frequency = 0.015f;
 
+		var noiseNeige = new FastNoiseLite();
+		noiseNeige.NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin;
+		noiseNeige.Seed = seed + 10;
+		noiseNeige.Frequency = 0.008f;
+
 		const int NiveauEau = 102;
+		const int SeuilNeigeBase = 205;
 
 		var densities = new float[tailleChunk + 1, hauteurMax + 1, tailleChunk + 1];
 		var materials = new byte[tailleChunk + 1, hauteurMax + 1, tailleChunk + 1];
@@ -947,7 +962,7 @@ public partial class Generateur_Voxel : Node3D
 					}
 					else if (globalY == hauteurSurface)
 					{
-						materials[x, y, z] = DeterminerMateriauCroûteStatique((int)globalY, hauteurSurface, temperature, humidite);
+						materials[x, y, z] = DeterminerMateriauCroûteStatique(globalX, globalZ, (int)globalY, hauteurSurface, temperature, humidite, noiseNeige, SeuilNeigeBase);
 						densities[x, y, z] = 10.0f;
 					}
 					else if (globalY < hauteurSurface && globalY >= hauteurSurface - 4)
@@ -999,11 +1014,13 @@ public partial class Generateur_Voxel : Node3D
 		return (densities, materials);
 	}
 
-	private static byte DeterminerMateriauCroûteStatique(int globalY, int hauteurSurface, float temperature, float humidite)
+	private static byte DeterminerMateriauCroûteStatique(float globalX, float globalZ, int globalY, int hauteurSurface, float temperature, float humidite, FastNoiseLite noiseNeige, int seuilNeigeBase)
 	{
-		const int NiveauEau = 102;
 		const int NiveauPlage = 102; // Seuil sable fixe
-		if (globalY > NiveauEau + 60) return 5;
+		// Neige à partir de 205 avec bruit naturel (variation locale de la limite des neiges)
+		float bruitNeige = noiseNeige.GetNoise2D(globalX, globalZ);
+		int seuilLocal = seuilNeigeBase + (int)(bruitNeige * 12f);
+		if (globalY >= seuilLocal) return 5;  // NEIGE
 		if (globalY <= NiveauPlage)
 			return (humidite > 0.3f) ? (byte)7 : (byte)3;
 		if (temperature > 0.3f)

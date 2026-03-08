@@ -23,12 +23,14 @@ public partial class Chunk_Serveur : RefCounted
 	private FastNoiseLite _noiseHumidite;
 	private FastNoiseLite _noiseCavernes;
 	private FastNoiseLite _noiseRivieres;
+	private FastNoiseLite _noiseNeige;
 
 	private const float Isolevel = 0.0f;
 	private const int NiveauEau = 102;
 	private const int ProfondeurBase = 104;
-	private const int AmplitudeMontagne = 100;
+	private const int AmplitudeMontagne = 396;  // Max ~500 (très rare en haut)
 	private const int NiveauPlage = 102;
+	private const int SeuilNeigeBase = 205;
 	/// <summary>Limites altitude flore. Inclut la zone de spawn (herbe haute).</summary>
 	private const float NIVEAU_MIN_FLORE = 5f;
 	private const float NIVEAU_MAX_FLORE = 260f;
@@ -105,6 +107,11 @@ public partial class Chunk_Serveur : RefCounted
 		_noiseRivieres.FractalType = FastNoiseLite.FractalTypeEnum.Ridged;
 		_noiseRivieres.Frequency = 0.003f;
 		_noiseRivieres.Seed = seed + 5;
+
+		_noiseNeige = new FastNoiseLite();
+		_noiseNeige.NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin;
+		_noiseNeige.Seed = seed + 10;
+		_noiseNeige.Frequency = 0.008f;  // Variation locale naturelle de la limite des neiges
 	}
 
 	public bool EstPret => _densities != null;
@@ -143,7 +150,7 @@ public partial class Chunk_Serveur : RefCounted
 						}
 						else if (globalY == hauteurSurface)
 						{
-							byte mat = DeterminerMateriauCroûte((int)globalY, hauteurSurface, temperature, humidite);
+							byte mat = DeterminerMateriauCroûte((int)xGlobal, (int)zGlobal, (int)globalY, hauteurSurface, temperature, humidite);
 							_materials[x, y, z] = mat;
 							_densities[x, y, z] = 10.0f;
 							// Gazon partout sur herbe (ID 1), buissons à certaines positions — uniquement sur terrain plat
@@ -214,7 +221,7 @@ public partial class Chunk_Serveur : RefCounted
 	{
 		float bruitBrut = _noiseSurface.GetNoise2D(xGlobal, zGlobal);
 		float bruitNormalise = (bruitBrut + 1.0f) / 2.0f;
-		float relief = Mathf.Pow(bruitNormalise, 3.0f);
+		float relief = Mathf.Pow(bruitNormalise, 5.0f);  // Exposant 5 : plus c'est haut, plus c'est rare
 		if (relief < 0.05f) relief = 0.0f;
 		else relief = relief - 0.05f;
 
@@ -293,9 +300,12 @@ public partial class Chunk_Serveur : RefCounted
 		return diffMax < SEUIL_PENTE_MAX;
 	}
 
-	private byte DeterminerMateriauCroûte(int globalY, int hauteurSurface, float temperature, float humidite)
+	private byte DeterminerMateriauCroûte(int xGlobal, int zGlobal, int globalY, int hauteurSurface, float temperature, float humidite)
 	{
-		if (globalY > NiveauEau + 60) return 5;
+		// Neige à partir de 205 avec bruit naturel (variation locale de la limite des neiges)
+		float bruitNeige = _noiseNeige.GetNoise2D(xGlobal, zGlobal);  // [-1, 1]
+		int seuilLocal = SeuilNeigeBase + (int)(bruitNeige * 12f);     // Variation ±12 blocs
+		if (globalY >= seuilLocal) return 5;  // NEIGE
 		if (globalY <= NiveauPlage) return (humidite > 0.3f) ? (byte)7 : (byte)3;
 		if (temperature > 0.3f)
 		{

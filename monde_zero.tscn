@@ -62,9 +62,9 @@ adjustment_contrast = 1.25
 
 [node name="Gestionnaire_Monde" type="Node3D" parent="." unique_id=2015054098]
 script = ExtResource("3_monde")
-RenderDistance = 12
-MaxChunksParFrame = 8
-FuseauHoraireHeures = -9.0
+RenderDistance = 14
+MaxChunksParFrame = 6
+FuseauHoraireHeures = -8.0
 MaterielTerrain = ExtResource("14_manteau")
 
 [node name="HUD_Inventaire" type="CanvasLayer" parent="Gestionnaire_Monde" unique_id=1861864172]

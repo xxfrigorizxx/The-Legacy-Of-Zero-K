@@ -10,7 +10,7 @@ using FileAccess = Godot.FileAccess;
 public partial class Monde_Serveur : Node
 {
 	[Export] public int TailleChunk = 16;
-	[Export] public int HauteurMax = 256;
+	[Export] public int HauteurMax = 512;  // Montagnes jusqu'à ~500
 	[Export] public int SeedTerrain = 19847;
 	[Export] public int RayonMondeChunks = 1000;
 	[Export] public int RenderDistance = 200;

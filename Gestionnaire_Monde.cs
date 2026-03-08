@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 public partial class Gestionnaire_Monde : Node3D
 {
 	[Export] public int TailleChunk = 16;
-	[Export] public int HauteurMax = 256;
+	[Export] public int HauteurMax = 512;  // Montagnes jusqu'à ~500
 	[Export] public int SeedTerrain = 19847;
 	[Export] public int RenderDistance = 200;
 	[Export] public int MaxChunksParFrame = 4;
@@ -493,10 +493,10 @@ public partial class Gestionnaire_Monde : Node3D
 		if (altitude < NIVEAU_EAU + 2.0f && altitude >= NIVEAU_EAU - 5.0f)
 			return 3; // ID 3 = Sable
 
-		// Règle 3 : Les hauts sommets (La Neige)
-		const float NIVEAU_NEIGE = 200f;
+		// Règle 3 : Les hauts sommets (La Neige) — seuil 205 avec variation naturelle en jeu
+		const float NIVEAU_NEIGE = 205f;
 		if (altitude > NIVEAU_NEIGE)
-			return 4; // ID 4 = Neige
+			return 4; // ID 4 = Neige (atlas livre)
 
 		// Par défaut : plat et altitude moyenne
 		return 1; // ID 1 = Terre
