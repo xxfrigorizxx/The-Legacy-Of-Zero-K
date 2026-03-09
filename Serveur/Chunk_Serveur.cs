@@ -30,7 +30,8 @@ public partial class Chunk_Serveur : RefCounted
 	private const int ProfondeurBase = 104;
 	private const int AmplitudeMontagne = 396;  // Max ~500 (très rare en haut)
 	private const int NiveauPlage = 102;  // Sable jusqu'à 102, herbe à 103-104 (niveau eau inchangé)
-	private const int SeuilNeigeBase = 200;  // Neige à 200, transition organique avec bruit ±18
+	private const int SeuilNeigeBase = 350;  // Neige à 350 (montagnes jusqu'à 700), bruit ±18
+	private const int SeuilMontagneRoche = 250;  // À partir de 250 : que de la pierre (comme sous le sol)
 	/// <summary>Limites altitude flore. Inclut la zone de spawn (herbe haute).</summary>
 	private const float NIVEAU_MIN_FLORE = 5f;
 	private const float NIVEAU_MAX_FLORE = 260f;
@@ -188,7 +189,8 @@ public partial class Chunk_Serveur : RefCounted
 							else
 							{
 								_densities[x, y, z] = 10.0f;
-								_materials[x, y, z] = (humidite > 0.3f) ? (byte)7 : (byte)6;
+								int seuilNeigeLocal = SeuilNeigeBase + (int)(_noiseNeige.GetNoise2D(xGlobal, zGlobal) * 18f);
+								_materials[x, y, z] = (hauteurSurface >= SeuilMontagneRoche || hauteurSurface >= seuilNeigeLocal) ? (byte)2 : (humidite > 0.3f ? (byte)7 : (byte)6);
 							}
 						}
 						else if (globalY < hauteurSurface - 4)
@@ -227,7 +229,8 @@ public partial class Chunk_Serveur : RefCounted
 	{
 		float bruitBrut = _noiseSurface.GetNoise2D(xGlobal, zGlobal);
 		float bruitNormalise = (bruitBrut + 1.0f) / 2.0f;
-		float relief = Mathf.Pow(bruitNormalise, 3.0f);  // Exposant 3 : plus de collines et montagnes
+		// Exposant 2 : relief moins comprimé → montagnes visibles (avant : ³ écrasait tout en plaine)
+		float relief = Mathf.Pow(bruitNormalise, 2.0f);
 
 		// Plaine : plaines basses 103-105 (biais fort vers 103) + plaine principale 105-118
 		float bruitPlaine = _noiseErosion.GetNoise2D(xGlobal * 0.0003f, zGlobal * 0.0003f);
@@ -244,14 +247,14 @@ public partial class Chunk_Serveur : RefCounted
 			rampBase = 105f + t * 13f;  // Plaine principale 105 → 118
 		}
 
-		// Tier 2 + Montagnes : plaine ~45%, tier2 ~30%, montagnes ~25%
-		float tTier2 = Mathf.Clamp((relief - 0.09f) / 0.33f, 0f, 1f);
-		float tMont = Mathf.Clamp((relief - 0.42f) / 0.58f, 0f, 1f);
+		// Tier 2 + Montagnes : seuils abaissés (relief²) → plaine ~40%, collines ~35%, montagnes ~25%
+		float tTier2 = Mathf.Clamp((relief - 0.15f) / 0.35f, 0f, 1f);
+		float tMont = Mathf.Clamp((relief - 0.30f) / 0.45f, 0f, 1f);
 		float hTier2 = tTier2 * tTier2 * 82f;
 		float hMontagnes = tMont * tMont * 500f;  // Montagnes jusqu'à 700
 
-		// Transition progressive base → tier2+montagnes (blend 0.05 → 0.20)
-		float poidsBase = 1f - Mathf.Clamp((relief - 0.05f) / 0.15f, 0f, 1f);
+		// Transition progressive base → tier2+montagnes (blend 0.05 → 0.22)
+		float poidsBase = 1f - Mathf.Clamp((relief - 0.05f) / 0.17f, 0f, 1f);
 		poidsBase = poidsBase * poidsBase * (3f - 2f * poidsBase);
 		float hauteurHaut = 118f + hTier2 + hMontagnes;
 		int hauteurBase = (int)(rampBase * poidsBase + hauteurHaut * (1f - poidsBase));
@@ -332,10 +335,10 @@ public partial class Chunk_Serveur : RefCounted
 
 	private byte DeterminerMateriauCroûte(int xGlobal, int zGlobal, int globalY, int hauteurSurface, float temperature, float humidite)
 	{
-		// Neige à partir de 200 avec bruit organique (±18) — transition naturelle, pas de ligne droite
 		float bruitNeige = _noiseNeige.GetNoise2D(xGlobal, zGlobal);
 		int seuilLocal = SeuilNeigeBase + (int)(bruitNeige * 18f);
-		if (globalY >= seuilLocal) return 5;  // NEIGE
+		if (globalY >= seuilLocal) return 5;  // NEIGE (sommets 350-700)
+		if (globalY >= SeuilMontagneRoche) return 2;  // Roche nue (250-350)
 		if (globalY <= NiveauPlage) return (humidite > 0.2f) ? (byte)7 : (byte)3;  // Plage : seuil doux
 		// Sable UNIQUEMENT quand très sec ET très chaud (temp + humidité liés logiquement)
 		if (temperature > 0.5f && humidite < -0.5f) return 3;  // Désert : sable

@@ -339,6 +339,9 @@ public partial class Gestionnaire_Monde : Node3D
 		AddChild(_mondeServeur);
 		AddChild(_mondeClient);
 
+		// Matrice visqueuse : Area3D océan (Y < 103) impose damp + gravité réduite (Archimède)
+		CreerAreaOcean();
+
 		// Lier le chunk de spawn en priorité pour éviter chute libre (comme les 2 fois précédentes)
 		Vector3 pos = _joueur.GlobalPosition;
 		Vector2I chunkSpawn = new Vector2I(Mathf.FloorToInt(pos.X / (float)TailleChunk), Mathf.FloorToInt(pos.Z / (float)TailleChunk));
@@ -347,6 +350,30 @@ public partial class Gestionnaire_Monde : Node3D
 		// Envoyer le fuseau horaire de la dimension au client (spawn / portail)
 		EnvoyerFuseauHoraireAuPeer(1); // Peer 1 = hôte local en Solo
 		Multiplayer.PeerConnected += EnvoyerFuseauHoraireAuPeer;
+	}
+
+	/// <summary>Matrice visqueuse : océan physique couvrant Y &lt; 103. Linear/Angular Damp 4.0, gravité 4 (Archimède).</summary>
+	private void CreerAreaOcean()
+	{
+		const float NIVEAU_EAU = 103f;
+		float demiRayon = RayonMondeChunks * TailleChunk;
+		float hauteurZone = NIVEAU_EAU + 500f; // Couvre jusqu'en profondeur -500
+		var ocean = new Area3D { Name = "Ocean_Physique" };
+		ocean.GravitySpaceOverride = Area3D.SpaceOverride.Replace;
+		ocean.Gravity = 4.0f; // Poussée d'Archimède (réduit chute)
+		ocean.GravityDirection = new Vector3(0, -1, 0);
+		ocean.GravityPoint = false;
+		ocean.LinearDamp = 4.0f;
+		ocean.LinearDampSpaceOverride = Area3D.SpaceOverride.Replace;
+		ocean.AngularDamp = 4.0f;
+		ocean.AngularDampSpaceOverride = Area3D.SpaceOverride.Replace;
+		ocean.Priority = 100; // Priorité haute sur le monde par défaut
+
+		var col = new CollisionShape3D();
+		col.Shape = new BoxShape3D { Size = new Vector3(demiRayon * 2f, hauteurZone, demiRayon * 2f) };
+		ocean.AddChild(col);
+		ocean.Position = new Vector3(0, (NIVEAU_EAU - 500f) / 2f, 0); // Centre du volume
+		AddChild(ocean);
 	}
 
 	private void EnvoyerFuseauHoraireAuPeer(long peerId)
@@ -511,9 +538,9 @@ public partial class Gestionnaire_Monde : Node3D
 		if (altitude < NIVEAU_EAU + 2.0f && altitude >= NIVEAU_EAU - 5.0f)
 			return 3; // ID 3 = Sable
 
-		// Règle 3 : Les hauts sommets (La Neige) — seuil 200 avec variation organique (±18)
+		// Règle 3 : Les hauts sommets (La Neige) — seuil 350 (montagnes jusqu'à 700)
 		int bruit = (int)((positionGlobale.X * 73856093 + positionGlobale.Z * 19349663) % 37) - 18;
-		float seuilNeige = 200f + bruit;
+		float seuilNeige = 350f + bruit;
 		if (altitude > seuilNeige)
 			return 4; // ID 4 = Neige (atlas livre)
 

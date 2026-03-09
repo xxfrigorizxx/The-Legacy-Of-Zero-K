@@ -1,14 +1,42 @@
 using Godot;
 using System.Collections.Generic;
 
+/// <summary>Composition chimique d'une roche. Dicte couleur, rugosité, future résistance et point de fusion.</summary>
+public struct ProfilMineral
+{
+	public string Nom;
+	public Color CouleurBase;
+	public Color CouleurVeine;
+	public Color CouleurTache;
+	public float Rugosite;
+	public int ResistanceFuture;
+}
+
 /// <summary>ADN de l'objet libre : identifie ce que le Raycast du joueur ramasse.
 /// 10 = Petite Pierre, 11 = Silex, 12 = Pierre Moyenne, 13 = Grosse Pierre, 14 = Très Grosse Pierre.
-/// Banque d'ADN : 5 variations procédurales en cache, les objets piochent au lieu de recalculer.</summary>
+/// Banque d'ADN : variations procédurales + composition chimique réelle.</summary>
 public partial class ItemPhysique : Node3D
 {
+	/// <summary>Table géologique : compositions minérales réelles (couleur, rugosité, future résistance).</summary>
+	public static readonly ProfilMineral[] TableGeologique = new ProfilMineral[]
+	{
+		new ProfilMineral { Nom = "Granit", CouleurBase = new Color(0.4f, 0.4f, 0.4f), CouleurVeine = new Color(0.8f, 0.8f, 0.8f), CouleurTache = new Color(0.1f, 0.1f, 0.1f), Rugosite = 0.9f, ResistanceFuture = 80 },
+		new ProfilMineral { Nom = "Basalte", CouleurBase = new Color(0.15f, 0.15f, 0.15f), CouleurVeine = new Color(0.1f, 0.1f, 0.1f), CouleurTache = new Color(0.05f, 0.05f, 0.05f), Rugosite = 0.95f, ResistanceFuture = 90 },
+		new ProfilMineral { Nom = "Calcaire", CouleurBase = new Color(0.85f, 0.85f, 0.80f), CouleurVeine = new Color(0.9f, 0.9f, 0.85f), CouleurTache = new Color(0.7f, 0.7f, 0.6f), Rugosite = 1.0f, ResistanceFuture = 20 },
+		new ProfilMineral { Nom = "Grès", CouleurBase = new Color(0.6f, 0.4f, 0.2f), CouleurVeine = new Color(0.7f, 0.5f, 0.3f), CouleurTache = new Color(0.4f, 0.2f, 0.1f), Rugosite = 0.98f, ResistanceFuture = 40 },
+		new ProfilMineral { Nom = "Schiste", CouleurBase = new Color(0.3f, 0.35f, 0.35f), CouleurVeine = new Color(0.2f, 0.25f, 0.25f), CouleurTache = new Color(0.4f, 0.45f, 0.45f), Rugosite = 0.8f, ResistanceFuture = 30 },
+		new ProfilMineral { Nom = "Silex", CouleurBase = new Color(0.12f, 0.12f, 0.14f), CouleurVeine = new Color(0.18f, 0.18f, 0.20f), CouleurTache = new Color(0.02f, 0.02f, 0.03f), Rugosite = 0.5f, ResistanceFuture = 85 },
+		new ProfilMineral { Nom = "Quartz", CouleurBase = new Color(0.9f, 0.88f, 0.85f), CouleurVeine = new Color(0.95f, 0.95f, 0.95f), CouleurTache = new Color(0.6f, 0.55f, 0.5f), Rugosite = 0.3f, ResistanceFuture = 70 },
+		new ProfilMineral { Nom = "Marbre", CouleurBase = new Color(0.85f, 0.85f, 0.9f), CouleurVeine = new Color(0.7f, 0.7f, 0.75f), CouleurTache = new Color(0.95f, 0.95f, 0.98f), Rugosite = 0.2f, ResistanceFuture = 50 },
+		new ProfilMineral { Nom = "Obsidienne", CouleurBase = new Color(0.08f, 0.08f, 0.1f), CouleurVeine = new Color(0.05f, 0.05f, 0.06f), CouleurTache = new Color(0.15f, 0.15f, 0.18f), Rugosite = 0.15f, ResistanceFuture = 75 },
+		new ProfilMineral { Nom = "Gneiss", CouleurBase = new Color(0.45f, 0.42f, 0.4f), CouleurVeine = new Color(0.55f, 0.5f, 0.48f), CouleurTache = new Color(0.25f, 0.22f, 0.2f), Rugosite = 0.85f, ResistanceFuture = 65 }
+	};
+
 	[Export] public int ID_Objet = 0;
 	/// <summary>Sauvegarde de la forme exacte (index dans la banque d'ADN). -1 = tirage aléatoire au spawn.</summary>
 	public int IndexCacheMemoire = -1;
+	/// <summary>Index dans TableGeologique. -1 = non défini (tirage au spawn).</summary>
+	public int IndexChimique = -1;
 
 	/// <summary>Banque d'ADN : accès public pour rendu en main et UI inventaire.</summary>
 	public static IReadOnlyList<Mesh> CacheMeshCaillou => _cacheMeshCaillou;
@@ -20,7 +48,7 @@ public partial class ItemPhysique : Node3D
 	private static readonly List<Shape3D> _cacheCollisionCaillou = new List<Shape3D>();
 	private static readonly List<Mesh> _cacheMeshSilex = new List<Mesh>();
 	private static readonly List<Shape3D> _cacheCollisionSilex = new List<Shape3D>();
-	private const int NbVariationsCache = 10;
+	private const int NbVariationsCache = 50;
 
 	public override void _Ready()
 	{
@@ -33,6 +61,10 @@ public partial class ItemPhysique : Node3D
 			else if (child is CollisionShape3D cs) hitbox = cs;
 		}
 		if (visuel == null || hitbox == null) return;
+
+		// Injection génétique : composition chimique (ou selon biome plus tard)
+		if (IndexChimique == -1)
+			IndexChimique = GD.RandRange(0, TableGeologique.Length - 1);
 
 		AppliquerMateriel(visuel);
 
@@ -89,20 +121,54 @@ public partial class ItemPhysique : Node3D
 
 	private void AppliquerMateriel(MeshInstance3D visuel)
 	{
+		visuel.MaterialOverride = CreerMaterielProcedural(ID_Objet == 11, IndexChimique);
+	}
+
+	/// <summary>Matériau procédural basé sur la chimie réelle (TableGeologique). Taches, veines, rugosité.</summary>
+	public static StandardMaterial3D CreerMaterielProcedural(bool estSilex, int indexChimique)
+	{
 		var materiel = new StandardMaterial3D();
-		if (ID_Objet == 11)
+		var bruitRelief = new FastNoiseLite { Seed = (int)GD.Randi() };
+
+		int idx = Mathf.Clamp(indexChimique, 0, TableGeologique.Length - 1);
+		ProfilMineral chimie = TableGeologique[idx];
+		materiel.Roughness = chimie.Rugosite;
+
+		// 1. Pigmentation par la chimie (CouleurTache → CouleurBase → CouleurVeine)
+		var bruitCouleur = new FastNoiseLite
 		{
-			materiel.AlbedoColor = new Color(0.1f, 0.1f, 0.15f);
-			materiel.Roughness = 0.4f;
-			materiel.Metallic = 0.5f;
+			Seed = (int)GD.Randi(),
+			NoiseType = FastNoiseLite.NoiseTypeEnum.SimplexSmooth,
+			Frequency = 0.03f
+		};
+		var textureCouleur = new NoiseTexture2D { Width = 256, Height = 256, Noise = bruitCouleur };
+		var degradeMineral = new Gradient();
+		degradeMineral.AddPoint(0f, chimie.CouleurTache);
+		degradeMineral.AddPoint(0.5f, chimie.CouleurBase);
+		degradeMineral.AddPoint(1f, chimie.CouleurVeine);
+		textureCouleur.ColorRamp = degradeMineral;
+		materiel.AlbedoTexture = textureCouleur;
+
+		// 2. Micro-relief (Normal Map)
+		var textureRelief = new NoiseTexture2D { Width = 256, Height = 256, GenerateMipmaps = true, AsNormalMap = true };
+		if (estSilex)
+		{
+			materiel.Metallic = 0.2f;
+			bruitRelief.NoiseType = FastNoiseLite.NoiseTypeEnum.Cellular;
+			bruitRelief.Frequency = 0.08f;
+			textureRelief.BumpStrength = 3.0f;
 		}
 		else
 		{
-			materiel.AlbedoColor = new Color(0.4f, 0.4f, 0.4f);
-			materiel.Roughness = 0.9f;
 			materiel.Metallic = 0.0f;
+			bruitRelief.NoiseType = FastNoiseLite.NoiseTypeEnum.Simplex;
+			bruitRelief.Frequency = 0.15f;
+			textureRelief.BumpStrength = 1.5f;
 		}
-		visuel.MaterialOverride = materiel;
+		textureRelief.Noise = bruitRelief;
+		materiel.NormalEnabled = true;
+		materiel.NormalTexture = textureRelief;
+		return materiel;
 	}
 
 	private void GenererEtMettreEnCache(bool estSilex)

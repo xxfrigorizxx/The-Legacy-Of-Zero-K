@@ -56,6 +56,11 @@ public partial class Monde_Serveur : Node
 		public Vector2I Coord;
 		public DonneesChunk Donnees;
 	}
+
+	/// <summary>Pierres chargées depuis disque → instanciation goutte-à-goutte (quand chunk dessiné à l'écran).</summary>
+	private Queue<(Vector3 pos, int id, int indexCache, int indexChimique)> _filePierresAInstancier = new Queue<(Vector3, int, int, int)>();
+	private const int MaxPierresParFrame = 12;
+
 	private float _tempsDepuisVerifDecharge;
 	private const float IntervalleEvaluationTectonique = 0.5f;
 
@@ -191,7 +196,7 @@ public partial class Monde_Serveur : Node
 					continue;
 				}
 
-				// BRANCHE COMMUNE : Chunk ressuscité — envoi direct. Pierres : chargement sauvegardées ou ensemencement.
+				// BRANCHE COMMUNE : Chunk ressuscité. Pierres : chargement sauvegardées si fichier existe, sinon procédural. Spawn uniquement quand chunk demandé (visible écran).
 				_chunks[chunkCible] = chunkActuel;
 				if (!ChargerEtSpawnerPierresChunk(chunkCible))
 					DeclencherEnsemencement(chunkCible, chunkActuel, TailleChunk);
@@ -210,6 +215,15 @@ public partial class Monde_Serveur : Node
 
 		// Réveil des pierres dormantes : quand joueur dans 2 chunks, le terrain est chargé → on dégèle
 		ReveillerPierresDansRayon();
+
+		// Goutte-à-goutte : pierres chargées depuis disque, instanciées quand chunk dessiné à l'écran
+		int nPierres = 0;
+		while (nPierres < MaxPierresParFrame && _filePierresAInstancier.Count > 0)
+		{
+			var (pos, id, idx, chim) = _filePierresAInstancier.Dequeue();
+			GenererItemPhysique(pos, id, idx, chim);
+			nPierres++;
+		}
 
 		_tempsEcoulement += (float)delta;
 		if (_tempsEcoulement < TICK_EAU) return;
@@ -392,12 +406,13 @@ public partial class Monde_Serveur : Node
 	private const int RAYON_ACTIVATION_PIERRES_CHUNKS = 2;
 	private const int ID_PETITE_PIERRE = 10;
 
-	/// <summary>Délai de synchronisation : attend 2 frames physiques pour que le ConcavePolygonShape3D du terrain soit enregistré avant d'ensemencer.</summary>
+	/// <summary>Délai de synchronisation : attend 2 frames physiques avant d'ensemencer progressivement.</summary>
 	private async void DeclencherEnsemencement(Vector2I chunkCoord, Chunk_Serveur chunk, float tailleChunk)
 	{
 		await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame);
 		await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame);
-		EnsemencerChunk(chunkCoord, chunk, tailleChunk);
+		var positionsFiltrees = CollecterPositionsEnsemencement(chunkCoord, chunk, tailleChunk);
+		await EnsemencerChunkProgressivement(positionsFiltrees);
 	}
 
 	private const int ID_SILEX = 11;
@@ -405,10 +420,10 @@ public partial class Monde_Serveur : Node
 	private const int ID_GROSSE_PIERRE = 13;
 	private const int ID_TRES_GROSSE_PIERRE = 14;
 
-	/// <summary>Pluie de lasers : scanne la surface du chunk (pas 3 m). Filtre géologique : pierres selon ID du sol. Silex inchangé.</summary>
-	private void EnsemencerChunk(Vector2I chunkCoord, Chunk_Serveur chunk, float tailleChunk)
+	/// <summary>Collecte les positions et IDs à ensemencer (sans instancier).</summary>
+	private List<(Vector3 pos, int id)> CollecterPositionsEnsemencement(Vector2I chunkCoord, Chunk_Serveur chunk, float tailleChunk)
 	{
-		if (_parentPourBlocsChutants == null) return;
+		var liste = new List<(Vector3 pos, int id)>();
 		var rng = new RandomNumberGenerator();
 		rng.Seed = (ulong)(chunkCoord.X * 73856093 + chunkCoord.Y * 19349663 + SeedTerrain);
 
@@ -416,7 +431,7 @@ public partial class Monde_Serveur : Node
 		{
 			for (float z = 0; z < tailleChunk; z += 3f)
 			{
-				if (rng.Randf() > 0.02f) continue; // PURGE LOGISTIQUE : 98% du temps, on ne fait rien (rareté précieuse)
+				if (rng.Randf() > 0.02f) continue;
 				int lx = Mathf.Clamp(Mathf.FloorToInt(x), 0, (int)tailleChunk);
 				int lz = Mathf.Clamp(Mathf.FloorToInt(z), 0, (int)tailleChunk);
 				var (ySurface, idMatiere) = chunk.ObtenirSurfaceEtMateriau(lx, lz);
@@ -427,26 +442,20 @@ public partial class Monde_Serveur : Node
 					ySurface + 0.5f,
 					chunkCoord.Y * tailleChunk + z + 0.5f
 				);
-				// DÉCALAGE DE SÉCURITÉ : on monte l'objet au-dessus du sol pour éviter l'encastrement
 				Vector3 pointDeSpawnSecurise = pointImpact + new Vector3(0, DECALAGE_SPAWN_VERTICAL, 0);
 
-				// Silex : sable sous l'eau (inchangé)
 				if (idMatiere == 3 && pointImpact.Y < NIVEAU_EAU)
 				{
-					GenererItemPhysique(pointDeSpawnSecurise, ID_SILEX);
+					liste.Add((pointDeSpawnSecurise, ID_SILEX));
 					continue;
 				}
 
-				// Filtre géologique des pierres : spawn sur tous les 4 tiers (plaine, tier2, montagnes, neige)
 				int idTailleChoisie = 0;
 				float proba = rng.Randf();
-				if (idMatiere == 1 || idMatiere == 3) // Terre, Sable (plaine)
-					idTailleChoisie = ID_PETITE_PIERRE;
-				else if (idMatiere == 7 || idMatiere == 8) // Boue, Argile (plaine humide)
-					idTailleChoisie = (proba > 0.4f) ? ID_PETITE_PIERRE : ID_PIERRE_MOYENNE;
-				else if (idMatiere == 5 || idMatiere == 6) // Neige, Terre aride (tous les tiers)
-					idTailleChoisie = (proba > 0.5f) ? ID_PETITE_PIERRE : ID_PIERRE_MOYENNE;
-				else if (idMatiere == 2) // Roche pure (montagnes)
+				if (idMatiere == 1 || idMatiere == 3) idTailleChoisie = ID_PETITE_PIERRE;
+				else if (idMatiere == 7 || idMatiere == 8) idTailleChoisie = (proba > 0.4f) ? ID_PETITE_PIERRE : ID_PIERRE_MOYENNE;
+				else if (idMatiere == 5 || idMatiere == 6) idTailleChoisie = (proba > 0.5f) ? ID_PETITE_PIERRE : ID_PIERRE_MOYENNE;
+				else if (idMatiere == 2)
 				{
 					if (proba < 0.40f) idTailleChoisie = ID_PETITE_PIERRE;
 					else if (proba < 0.70f) idTailleChoisie = ID_PIERRE_MOYENNE;
@@ -455,45 +464,46 @@ public partial class Monde_Serveur : Node
 				}
 
 				if (idTailleChoisie != 0)
-					GenererItemPhysique(pointDeSpawnSecurise, idTailleChoisie);
+					liste.Add((pointDeSpawnSecurise, idTailleChoisie));
 			}
+		}
+		return liste;
+	}
+
+	/// <summary>Goutte-à-goutte : un objet par frame physique pour éradiquer le lag spike.</summary>
+	private async Task EnsemencerChunkProgressivement(List<(Vector3 pos, int id)> positionsFiltrees)
+	{
+		foreach (var (pos, id) in positionsFiltrees)
+		{
+			GenererItemPhysique(pos, id);
+			await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame);
 		}
 	}
 
-	/// <summary>Crée un objet physique (pierres 10–14 ou Silex 11). indexCache = -1 pour tirage aléatoire au spawn.</summary>
-	private void GenererItemPhysique(Vector3 position, int idObjet, int indexCache = -1)
+	/// <summary>Unification lithique : Silex et Caillou ont exactement les mêmes paramètres RigidBody3D (Mass, Friction, Bounce). Seule la chimie visuelle diffère (ItemPhysique).</summary>
+	private void GenererItemPhysique(Vector3 position, int idObjet, int indexCache = -1, int indexChimique = -1)
 	{
 		if (_parentPourBlocsChutants == null) return;
-		Node3D corps;
-		if (idObjet == ID_SILEX)
-		{
-			var sb = new StaticBody3D();
-			var mesh = new MeshInstance3D { Mesh = new PrismMesh { Size = new Vector3(0.2f, 0.15f, 0.25f) } };
-			mesh.MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.6f, 0.55f, 0.5f) };
-			sb.AddChild(mesh);
-			sb.AddChild(new CollisionShape3D { Shape = new BoxShape3D { Size = new Vector3(0.2f, 0.15f, 0.25f) } });
-			corps = sb;
-		}
-		else
-		{
-			// Pierres 10, 12, 13, 14 : RigidBody3D gelé à la naissance (dormance). Réveil quand joueur dans rayon.
-			float rayon = idObjet == ID_PETITE_PIERRE ? 0.15f
-				: idObjet == ID_PIERRE_MOYENNE ? 0.25f
-				: idObjet == ID_GROSSE_PIERRE ? 0.4f
-				: 0.6f; // ID_TRES_GROSSE_PIERRE
-			float hauteur = rayon * 2f;
-			var rb = new RigidBody3D();
-			rb.Freeze = true; // Dormance : pas de physique tant que joueur hors rayon (chunk sûr chargé)
-			var mesh = new MeshInstance3D { Mesh = new SphereMesh { Radius = rayon, Height = hauteur } };
-			mesh.MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.5f, 0.45f, 0.4f) };
-			rb.AddChild(mesh);
-			rb.AddChild(new CollisionShape3D { Shape = new SphereShape3D { Radius = rayon } });
-			corps = rb;
-		}
-		var item = new ItemPhysique { ID_Objet = idObjet, IndexCacheMemoire = indexCache, Name = "ItemPhysique" };
-		corps.AddChild(item);
-		_parentPourBlocsChutants.AddChild(corps);
-		corps.GlobalPosition = position;
+		float rayon = idObjet == ID_SILEX ? 0.12f
+			: idObjet == ID_PETITE_PIERRE ? 0.15f
+			: idObjet == ID_PIERRE_MOYENNE ? 0.25f
+			: idObjet == ID_GROSSE_PIERRE ? 0.4f
+			: 0.6f;
+		float hauteur = idObjet == ID_SILEX ? 0.24f : rayon * 2f;
+
+		var rb = new RigidBody3D();
+		rb.Mass = 1.0f;
+		rb.PhysicsMaterialOverride = new PhysicsMaterial { Friction = 0.6f, Bounce = 0.1f };
+		rb.Freeze = true; // Dormance pour toutes (réveil dans rayon)
+
+		Mesh meshBase = idObjet == ID_SILEX ? new PrismMesh { Size = new Vector3(0.2f, 0.15f, 0.25f) } : new SphereMesh { Radius = rayon, Height = hauteur };
+		Shape3D shapeBase = idObjet == ID_SILEX ? new BoxShape3D { Size = new Vector3(0.2f, 0.15f, 0.25f) } : new SphereShape3D { Radius = rayon };
+		rb.AddChild(new MeshInstance3D { Mesh = meshBase });
+		rb.AddChild(new CollisionShape3D { Shape = shapeBase });
+		var item = new ItemPhysique { ID_Objet = idObjet, IndexCacheMemoire = indexCache, IndexChimique = indexChimique, Name = "ItemPhysique" };
+		rb.AddChild(item);
+		_parentPourBlocsChutants.AddChild(rb);
+		rb.GlobalPosition = position;
 	}
 
 	/// <summary>Rayon en unités : pierres gelées se réveillent quand joueur entre (2 chunks = terrain chargé).</summary>
@@ -511,7 +521,7 @@ public partial class Monde_Serveur : Node
 			var item = rb.GetNodeOrNull<ItemPhysique>("ItemPhysique");
 			if (item == null) continue;
 			int id = item.ID_Objet;
-			if (id != ID_PETITE_PIERRE && id != ID_PIERRE_MOYENNE && id != ID_GROSSE_PIERRE && id != ID_TRES_GROSSE_PIERRE) continue;
+			if (id != ID_PETITE_PIERRE && id != ID_PIERRE_MOYENNE && id != ID_GROSSE_PIERRE && id != ID_TRES_GROSSE_PIERRE && id != ID_SILEX) continue;
 			float distCarre = rb.GlobalPosition.DistanceSquaredTo(posJoueur);
 			if (distCarre <= rayonCarre)
 				rb.Freeze = false;
@@ -520,7 +530,7 @@ public partial class Monde_Serveur : Node
 		}
 	}
 
-	/// <summary>Sauvegarde les pierres et silex (IDs 10-14) avec IndexCacheMemoire pour conserver la forme exacte.</summary>
+	/// <summary>Sauvegarde les pierres et silex (IDs 10-14) avec IndexCacheMemoire et IndexChimique.</summary>
 	private void SauvegarderPierresChunk(Vector2I coord)
 	{
 		if (_parentPourBlocsChutants == null) return;
@@ -528,7 +538,7 @@ public partial class Monde_Serveur : Node
 		float xMax = (coord.X + 1) * TailleChunk;
 		float zMin = coord.Y * TailleChunk;
 		float zMax = (coord.Y + 1) * TailleChunk;
-		var pierres = new List<(Vector3 pos, int id, int index)>();
+		var pierres = new List<(Vector3 pos, int id, int index, int chimique)>();
 		foreach (Node child in _parentPourBlocsChutants.GetChildren())
 		{
 			var item = child.GetNodeOrNull<ItemPhysique>("ItemPhysique");
@@ -537,7 +547,7 @@ public partial class Monde_Serveur : Node
 			if (id < 10 || id > 14) continue;
 			Vector3 pos = (child as Node3D)?.GlobalPosition ?? Vector3.Zero;
 			if (pos.X >= xMin && pos.X < xMax && pos.Z >= zMin && pos.Z < zMax)
-				pierres.Add((pos, id, Mathf.Max(0, item.IndexCacheMemoire)));
+				pierres.Add((pos, id, Mathf.Max(0, item.IndexCacheMemoire), Mathf.Max(0, item.IndexChimique)));
 		}
 		if (pierres.Count == 0) return;
 		string nom = GameState.Instance?.NomMondeActuel ?? "MonMonde";
@@ -548,20 +558,21 @@ public partial class Monde_Serveur : Node
 		{
 			using (var w = new BinaryWriter(File.Open(chemin, FileMode.Create)))
 			{
-				w.Write(0x5A4B3249); // Magic "I2KZ" = format v2 avec IndexCacheMemoire
+				w.Write(0x5A4B324A); // Magic v3 = IndexCacheMemoire + IndexChimique
 				w.Write(pierres.Count);
-				foreach (var (pos, id, index) in pierres)
+				foreach (var (pos, id, index, chimique) in pierres)
 				{
 					w.Write(pos.X); w.Write(pos.Y); w.Write(pos.Z);
 					w.Write((byte)id);
 					w.Write((byte)index);
+					w.Write((byte)chimique);
 				}
 			}
 		}
 		catch (Exception ex) { GD.PrintErr($"ZERO-K : Erreur sauvegarde pierres chunk {coord} : {ex.Message}"); }
 	}
 
-	/// <summary>Charge et spawn les pierres sauvegardées. Rétrocompatible : v1 sans index, v2 = premier byte 0x02.</summary>
+	/// <summary>Charge et enfile les pierres (spawn quand chunk dessiné à l'écran). v1/v2/v3.</summary>
 	private bool ChargerEtSpawnerPierresChunk(Vector2I coord)
 	{
 		if (_parentPourBlocsChutants == null) return false;
@@ -574,15 +585,17 @@ public partial class Monde_Serveur : Node
 			using (var r = new BinaryReader(stream))
 			{
 				int magicOrCount = r.ReadInt32();
-				bool formatV2 = (magicOrCount == 0x5A4B3249); // "I2KZ"
-				int count = formatV2 ? r.ReadInt32() : magicOrCount;
+				bool formatV3 = (magicOrCount == 0x5A4B324A);
+				bool formatV2 = (magicOrCount == 0x5A4B3249) || formatV3;
+				int count = formatV2 || formatV3 ? r.ReadInt32() : magicOrCount;
 				for (int i = 0; i < count; i++)
 				{
 					float x = r.ReadSingle(), y = r.ReadSingle(), z = r.ReadSingle();
 					int id = r.ReadByte();
-					int indexCache = formatV2 ? r.ReadByte() : -1;
+					int indexCache = formatV2 || formatV3 ? r.ReadByte() : -1;
+					int indexChimique = formatV3 ? r.ReadByte() : -1;
 					if (id >= 10 && id <= 14)
-						GenererItemPhysique(new Vector3(x, y, z), id, indexCache);
+						_filePierresAInstancier.Enqueue((new Vector3(x, y, z), id, indexCache, indexChimique));
 				}
 			}
 			return true;
@@ -783,10 +796,10 @@ public partial class Monde_Serveur : Node
 		{
 			if (_chunks.TryGetValue(coord, out var chunk))
 			{
-				if (chunk.EstModifie)
-					chunk.SauvegarderChunkSurDisque();
-				SauvegarderPierresChunk(coord); // Toujours sauvegarder (pierres peuvent avoir bougé)
-				RetirerPierresChunk(coord);    // Retirer de la scène pour éviter doublons au rechargement
+				// Toujours sauvegarder à la décharge : écraser la save avec l'état actuel
+				chunk.SauvegarderChunkSurDisque();
+				SauvegarderPierresChunk(coord); // Remettre les cailloux qu'on avait
+				RetirerPierresChunk(coord);     // Retirer de la scène pour éviter doublons au rechargement
 				_chunks.Remove(coord);
 				_onOrdonnerDestructionChunk(coord);
 			}

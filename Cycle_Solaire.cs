@@ -65,17 +65,28 @@ public partial class Cycle_Solaire : Node
 		float hauteurSoleil = Mathf.Sin(Mathf.DegToRad(-angleX));
 
 		// Le soleil s'éteint sous l'horizon, la lune s'allume
+		// ProceduralSkyMaterial affiche 1 disque par DirectionalLight → sky_mode=1 (LightOnly) exclut du ciel
 		if (hauteurSoleil < 0)
 		{
 			_soleil.LightEnergy = 0f;
-			_soleil.Set("sky_mode", 1); // LightOnly — masque le disque solaire dans le ciel
-			if (_lune != null) _lune.LightEnergy = Mathf.Clamp(-hauteurSoleil * 0.15f, 0f, 0.15f);
+			_soleil.Set("sky_mode", 1); // Pas de disque soleil (sous l'horizon)
+			if (_lune != null)
+			{
+				_lune.Visible = true;
+				_lune.LightEnergy = Mathf.Clamp(-hauteurSoleil * 0.15f, 0f, 0.15f);
+				_lune.Set("sky_mode", 0); // Disque lune visible la nuit (LightAndSky)
+			}
 		}
 		else
 		{
 			_soleil.LightEnergy = Mathf.Clamp(hauteurSoleil * 1.5f, 0f, 1.5f);
-			_soleil.Set("sky_mode", 0); // LightAndSky — affiche le soleil dans le ciel
-			if (_lune != null) _lune.LightEnergy = 0f;
+			_soleil.Set("sky_mode", 0); // Disque soleil le jour (LightAndSky)
+			if (_lune != null)
+			{
+				_lune.Visible = false;
+				_lune.LightEnergy = 0f;
+				_lune.Set("sky_mode", 1); // CRITIQUE : LightOnly = pas de disque dans le ciel
+			}
 		}
 
 		// Assombrissement du monde (brouillard, ambiance, CIEL)

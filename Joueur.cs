@@ -1,11 +1,12 @@
 using Godot;
 using System;
 
-/// <summary>Slot d'inventaire avec ADN morphologique pour conserver la forme exacte (Caillou/Silex).</summary>
+/// <summary>Slot d'inventaire avec ADN morphologique (forme) et chimique (composition).</summary>
 public struct SlotInventaire
 {
     public int ID;
     public int IndexMorphologique;
+    public int IndexChimique;
     public bool EstVide => ID == 0;
 }
 
@@ -96,6 +97,7 @@ public partial class Joueur : CharacterBody3D
 
         var light = new DirectionalLight3D();
         light.RotationDegrees = new Vector3(-45, 30, 0);
+        light.Set("sky_mode", 1); // LightOnly : pas de disque dans le ciel (évite 2e soleil blanc dans SubViewport)
         viewport.AddChild(light);
 
         return container;
@@ -212,7 +214,7 @@ public partial class Joueur : CharacterBody3D
         Mesh m = ObtenirMeshDepuisCache(main.ID, main.IndexMorphologique);
         _objetEnMain.Mesh = m;
         if (m != null)
-            AppliquerMaterielObjet(_objetEnMain, main.ID);
+            AppliquerMaterielObjet(_objetEnMain, main.ID, main.IndexChimique);
     }
 
     /// <summary>Assigne le Mesh exact au SubViewport de chaque slot (pierre en 3D dans l'UI).</summary>
@@ -232,7 +234,7 @@ public partial class Joueur : CharacterBody3D
         Mesh m = ObtenirMeshDepuisCache(slot.ID, slot.IndexMorphologique);
         meshNode.Mesh = m;
         if (m != null)
-            AppliquerMaterielObjet(meshNode, slot.ID);
+            AppliquerMaterielObjet(meshNode, slot.ID, slot.IndexChimique);
     }
 
     /// <summary>Cache le SubViewport quand pas de pierre procédurale, pour laisser voir la couleur du slot.</summary>
@@ -259,22 +261,10 @@ public partial class Joueur : CharacterBody3D
         return null;
     }
 
-    private static void AppliquerMaterielObjet(MeshInstance3D visuel, int idObjet)
+    private static void AppliquerMaterielObjet(MeshInstance3D visuel, int idObjet, int indexChimique)
     {
-        var mat = new StandardMaterial3D();
-        if (idObjet == 11)
-        {
-            mat.AlbedoColor = new Color(0.1f, 0.1f, 0.15f);
-            mat.Roughness = 0.4f;
-            mat.Metallic = 0.5f;
-        }
-        else
-        {
-            mat.AlbedoColor = new Color(0.4f, 0.4f, 0.4f);
-            mat.Roughness = 0.9f;
-            mat.Metallic = 0f;
-        }
-        visuel.MaterialOverride = mat;
+        int chimique = Mathf.Clamp(indexChimique, 0, ItemPhysique.TableGeologique.Length - 1);
+        visuel.MaterialOverride = ItemPhysique.CreerMaterielProcedural(idObjet == 11, chimique);
     }
 
     /// <summary>Phase 1 pure : minage du terrain Marching Cubes uniquement. Clic gauche.</summary>
@@ -299,7 +289,7 @@ public partial class Joueur : CharacterBody3D
 
         _gestionnaireMonde?.AppliquerDestructionGlobale(pointImpact, RAYON_SCULPTURE);
 
-        var nouveauSlot = new SlotInventaire { ID = idExtrait, IndexMorphologique = 0 };
+        var nouveauSlot = new SlotInventaire { ID = idExtrait, IndexMorphologique = 0, IndexChimique = 0 };
         if (MainGaucheEstActive)
         {
             if (MainGauche.EstVide) MainGauche = nouveauSlot;
@@ -327,7 +317,7 @@ public partial class Joueur : CharacterBody3D
         {
             int id = objetTouche.HasMeta("ID_Matiere") ? (int)objetTouche.GetMeta("ID_Matiere").AsInt32() : 1;
             var item = objetTouche.GetNodeOrNull<ItemPhysique>("ItemPhysique");
-            nouveauSlot = new SlotInventaire { ID = id, IndexMorphologique = item?.IndexCacheMemoire ?? 0 };
+            nouveauSlot = new SlotInventaire { ID = id, IndexMorphologique = item?.IndexCacheMemoire ?? 0, IndexChimique = item?.IndexChimique ?? 0 };
         }
         else if (objetTouche is RigidBody3D rb)
         {
@@ -338,7 +328,7 @@ public partial class Joueur : CharacterBody3D
                 GD.Print("ZERO-K : Masse excessive. La colonne vertébrale céderait. Action bloquée.");
                 return;
             }
-            nouveauSlot = new SlotInventaire { ID = item.ID_Objet, IndexMorphologique = item.IndexCacheMemoire };
+            nouveauSlot = new SlotInventaire { ID = item.ID_Objet, IndexMorphologique = item.IndexCacheMemoire, IndexChimique = item.IndexChimique };
         }
         else if (objetTouche is StaticBody3D sb)
         {
@@ -349,7 +339,7 @@ public partial class Joueur : CharacterBody3D
                 GD.Print("ZERO-K : Masse excessive. La colonne vertébrale céderait. Action bloquée.");
                 return;
             }
-            nouveauSlot = new SlotInventaire { ID = item.ID_Objet, IndexMorphologique = item.IndexCacheMemoire };
+            nouveauSlot = new SlotInventaire { ID = item.ID_Objet, IndexMorphologique = item.IndexCacheMemoire, IndexChimique = item.IndexChimique };
         }
         else
             return;
@@ -442,7 +432,7 @@ public partial class Joueur : CharacterBody3D
         corps.AddToGroup("BlocsPoses");
         if (id == 10 || id == 11 || id == 12)
         {
-            var item = new ItemPhysique { ID_Objet = id, IndexCacheMemoire = mainActive.IndexMorphologique, Name = "ItemPhysique" };
+            var item = new ItemPhysique { ID_Objet = id, IndexCacheMemoire = mainActive.IndexMorphologique, IndexChimique = mainActive.IndexChimique, Name = "ItemPhysique" };
             corps.AddChild(item);
         }
         GetParent().AddChild(corps);

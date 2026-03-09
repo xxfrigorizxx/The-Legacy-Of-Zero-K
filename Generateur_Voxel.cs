@@ -699,7 +699,7 @@ public partial class Generateur_Voxel : Node3D
 
 		float bruitBrut = noiseSurface.GetNoise2D(worldX, worldZ);
 		float bruitNormalise = (bruitBrut + 1.0f) / 2.0f;
-		float relief = Mathf.Pow(bruitNormalise, 3.0f);
+		float relief = Mathf.Pow(bruitNormalise, 2.0f);  // Exposant 2 : montagnes visibles (³ écrasait tout)
 
 		// Plaine : plaines basses 103-105 (biais fort vers 103) + plaine principale 105-118
 		float bruitPlaine = noiseSurface.GetNoise2D(worldX * 0.0003f, worldZ * 0.0003f);
@@ -716,14 +716,14 @@ public partial class Generateur_Voxel : Node3D
 			rampBase = 105f + t * 13f;  // Plaine principale 105 → 118
 		}
 
-		// Tier 2 + Montagnes : relief 0.09→0.42 (tier2), 0.42→1.0 (montagnes). % : plaine ~45%, tier2 ~30%, montagnes ~25%
-		float tTier2 = Mathf.Clamp((relief - 0.09f) / 0.33f, 0f, 1f);
-		float tMont = Mathf.Clamp((relief - 0.42f) / 0.58f, 0f, 1f);
+		// Tier 2 + Montagnes : seuils abaissés (relief²) → montagnes ~25% du terrain
+		float tTier2 = Mathf.Clamp((relief - 0.15f) / 0.35f, 0f, 1f);
+		float tMont = Mathf.Clamp((relief - 0.30f) / 0.45f, 0f, 1f);
 		float hTier2 = tTier2 * tTier2 * 82f;
 		float hMontagnes = tMont * tMont * 500f;  // Montagnes jusqu'à 700
 
-		// Transition progressive base → tier2+montagnes (blend 0.05 → 0.20)
-		float poidsBase = 1f - Mathf.Clamp((relief - 0.05f) / 0.15f, 0f, 1f);
+		// Transition progressive base → tier2+montagnes (blend 0.05 → 0.22)
+		float poidsBase = 1f - Mathf.Clamp((relief - 0.05f) / 0.17f, 0f, 1f);
 		poidsBase = poidsBase * poidsBase * (3f - 2f * poidsBase);
 		float hauteurHaut = 118f + hTier2 + hMontagnes;
 		int hauteurBase = (int)(rampBase * poidsBase + hauteurHaut * (1f - poidsBase));
@@ -746,7 +746,7 @@ public partial class Generateur_Voxel : Node3D
 		float bruitBrut = _noiseSurface.GetNoise2D(xGlobal, zGlobal);
 		float bruitNormalise = (bruitBrut + 1.0f) / 2.0f;
 
-		float relief = Mathf.Pow(bruitNormalise, 3.0f);  // Exposant 3 : plus de collines et montagnes
+		float relief = Mathf.Pow(bruitNormalise, 2.0f);  // Exposant 2 : montagnes visibles (³ écrasait tout)
 
 		// Plaine : plaines basses 103-105 (biais fort vers 103) + plaine principale 105-118
 		float bruitPlaine = _noiseErosion.GetNoise2D(xGlobal * 0.0003f, zGlobal * 0.0003f);
@@ -763,14 +763,14 @@ public partial class Generateur_Voxel : Node3D
 			rampBase = 105f + t * 13f;  // Plaine principale 105 → 118
 		}
 
-		// Tier 2 + Montagnes : plaine ~45%, tier2 ~30%, montagnes ~25%
-		float tTier2 = Mathf.Clamp((relief - 0.09f) / 0.33f, 0f, 1f);
-		float tMont = Mathf.Clamp((relief - 0.42f) / 0.58f, 0f, 1f);
+		// Tier 2 + Montagnes : seuils abaissés (relief²) → montagnes ~25%
+		float tTier2 = Mathf.Clamp((relief - 0.15f) / 0.35f, 0f, 1f);
+		float tMont = Mathf.Clamp((relief - 0.30f) / 0.45f, 0f, 1f);
 		float hTier2 = tTier2 * tTier2 * 82f;
 		float hMontagnes = tMont * tMont * 500f;
 
-		// Transition progressive base → tier2+montagnes (blend 0.05 → 0.20)
-		float poidsBase = 1f - Mathf.Clamp((relief - 0.05f) / 0.15f, 0f, 1f);
+		// Transition progressive base → tier2+montagnes (blend 0.05 → 0.22)
+		float poidsBase = 1f - Mathf.Clamp((relief - 0.05f) / 0.17f, 0f, 1f);
 		poidsBase = poidsBase * poidsBase * (3f - 2f * poidsBase);
 		float hauteurHaut = 118f + hTier2 + hMontagnes;
 		int hauteurBase = (int)(rampBase * poidsBase + hauteurHaut * (1f - poidsBase));
@@ -790,14 +790,15 @@ public partial class Generateur_Voxel : Node3D
 	}
 
 	private const int NiveauPlage = 102;  // Sable jusqu'à 102, herbe à 103-104 (niveau eau inchangé)
-	private const int SeuilNeigeBase = 200;  // Neige à partir de 200, transition organique avec bruit
+	private const int SeuilNeigeBase = 350;  // Neige à partir de 350 (montagnes jusqu'à 700), bruit ±18
+	private const int SeuilMontagneRoche = 250;  // À partir de 250 : roche nue (n'affecte pas biomes au sol)
 
 	private byte DeterminerMateriauCroûte(float globalX, float globalZ, int globalY, int hauteurSurface, float temperature, float humidite)
 	{
-		// Neige à partir de 200 avec bruit organique (±18) — transition naturelle, pas de ligne droite
 		float bruitNeige = _noiseNeige.GetNoise2D(globalX, globalZ);
 		int seuilLocal = SeuilNeigeBase + (int)(bruitNeige * 18f);
-		if (globalY >= seuilLocal) return 5;  // NEIGE
+		if (globalY >= seuilLocal) return 5;  // NEIGE (sommets 350-700)
+		if (globalY >= SeuilMontagneRoche) return 2;  // Roche nue (250-350, sous la limite des neiges)
 		if (globalY <= NiveauPlage) return (humidite > 0.2f) ? (byte)7 : (byte)3;  // Plage : seuil doux
 		// Sable UNIQUEMENT quand très sec ET très chaud (temp + humidité liés logiquement)
 		if (temperature > 0.5f && humidite < -0.5f) return 3;  // Désert : sable
@@ -875,7 +876,8 @@ public partial class Generateur_Voxel : Node3D
 						else
 						{
 							_densities[x, y, z] = 10.0f;
-							_materials[x, y, z] = (humidite > 0.3f) ? (byte)7 : (byte)6;
+							int seuilNeigeLocal = SeuilNeigeBase + (int)(_noiseNeige.GetNoise2D(globalX, globalZ) * 18f);
+							_materials[x, y, z] = (hauteurSurface >= SeuilMontagneRoche || hauteurSurface >= seuilNeigeLocal) ? (byte)2 : (humidite > 0.3f ? (byte)7 : (byte)6);
 						}
 					}
 					else if (globalY < hauteurSurface - 4)
@@ -889,7 +891,7 @@ public partial class Generateur_Voxel : Node3D
 						else
 						{
 							_densities[x, y, z] = 10.0f;
-							_materials[x, y, z] = 2;
+							_materials[x, y, z] = 2;  // Profondeur = toujours roche
 						}
 					}
 					else if (globalY > hauteurSurface && globalY <= NiveauEau)
@@ -975,7 +977,7 @@ public partial class Generateur_Voxel : Node3D
 		noiseNeige.Frequency = 0.008f;
 
 		const int NiveauEau = 103;  // +1 m
-		const int SeuilNeigeBase = 200;  // Neige à 200, transition organique
+		const int SeuilNeigeBase = 350;  // Neige à 350 (montagnes jusqu'à 700)
 
 		var densities = new float[tailleChunk + 1, hauteurMax + 1, tailleChunk + 1];
 		var materials = new byte[tailleChunk + 1, hauteurMax + 1, tailleChunk + 1];
@@ -1015,7 +1017,9 @@ public partial class Generateur_Voxel : Node3D
 						else
 						{
 							densities[x, y, z] = 10.0f;
-							materials[x, y, z] = (humidite > 0.3f) ? (byte)7 : (byte)6;
+							int seuilNeigeLocal = SeuilNeigeBase + (int)(noiseNeige.GetNoise2D(globalX, globalZ) * 18f);
+							const int SeuilMontagneRoche = 250;
+							materials[x, y, z] = (hauteurSurface >= SeuilMontagneRoche || hauteurSurface >= seuilNeigeLocal) ? (byte)2 : (humidite > 0.3f ? (byte)7 : (byte)6);
 						}
 					}
 					else if (globalY < hauteurSurface - 4)
@@ -1056,9 +1060,11 @@ public partial class Generateur_Voxel : Node3D
 	private static byte DeterminerMateriauCroûteStatique(float globalX, float globalZ, int globalY, int hauteurSurface, float temperature, float humidite, FastNoiseLite noiseNeige, int seuilNeigeBase)
 	{
 		const int NiveauPlage = 102;  // Sable jusqu'à 102, herbe à 103-104
+		const int SeuilMontagneRoche = 250;  // À partir de 250 : que de la pierre
 		float bruitNeige = noiseNeige.GetNoise2D(globalX, globalZ);
-		int seuilLocal = seuilNeigeBase + (int)(bruitNeige * 18f);  // Bruit organique ±18
-		if (globalY >= seuilLocal) return 5;  // NEIGE
+		int seuilLocal = seuilNeigeBase + (int)(bruitNeige * 18f);
+		if (globalY >= seuilLocal) return 5;  // NEIGE (sommets 350+)
+		if (globalY >= SeuilMontagneRoche) return 2;  // Roche nue (250-350)
 		if (globalY <= NiveauPlage) return (humidite > 0.2f) ? (byte)7 : (byte)3;
 		// Sable UNIQUEMENT quand très sec ET très chaud (temp + humidité liés)
 		if (temperature > 0.5f && humidite < -0.5f) return 3;  // Désert : sable
