@@ -538,9 +538,9 @@ public partial class Gestionnaire_Monde : Node3D
 		if (altitude < NIVEAU_EAU + 2.0f && altitude >= NIVEAU_EAU - 5.0f)
 			return 3; // ID 3 = Sable
 
-		// Règle 3 : Les hauts sommets (La Neige) — seuil 350 (montagnes jusqu'à 700)
+		// Règle 3 : Les hauts sommets (La Neige) — 245-255 (bruit)
 		int bruit = (int)((positionGlobale.X * 73856093 + positionGlobale.Z * 19349663) % 37) - 18;
-		float seuilNeige = 350f + bruit;
+		float seuilNeige = 250f + bruit * 0.3f;
 		if (altitude > seuilNeige)
 			return 4; // ID 4 = Neige (atlas livre)
 

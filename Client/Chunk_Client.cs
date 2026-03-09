@@ -22,7 +22,7 @@ public partial class Chunk_Client : Node3D
 	public int HauteurMax { get; set; }
 
 	private const int HAUTEUR_SECTION = 16;
-	private const int NB_SECTIONS = 16;
+	private const int NB_SECTIONS = 45;  // 45×16 = 720 (HauteurMax) — avant: 16 = 256 uniquement
 	private const float Isolevel = 0.0f;
 
 	private MeshInstance3D[] _sectionsTerrain;

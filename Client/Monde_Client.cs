@@ -236,7 +236,7 @@ public partial class Monde_Client : Node3D
 		_modificationEnCours = true;
 		if (!_chunks.TryGetValue(coordChunk, out _)) return;
 		foreach (int sec in sectionsAffectees)
-			if (sec >= 0 && sec < 16) _sectionsAReconstruire.Add((coordChunk.X, coordChunk.Y, sec));
+			if (sec >= 0 && sec < 45) _sectionsAReconstruire.Add((coordChunk.X, coordChunk.Y, sec));
 	}
 
 	/// <summary>Micro-RPC : mise à jour voxel unique. Modifie le chunk principal ET la réplique sur le padding des voisins (évite déchirures aux frontières).</summary>
@@ -272,9 +272,9 @@ public partial class Monde_Client : Node3D
 			_sectionsAReconstruire.Add((cx - 1, cz - 1, sec));
 		}
 
-		if (sec >= 0 && sec < 16) _sectionsAReconstruire.Add((cx, cz, sec));
+		if (sec >= 0 && sec < 45) _sectionsAReconstruire.Add((cx, cz, sec));
 		if (localY == 0 && posGlobal.Y > 0 && sec - 1 >= 0) _sectionsAReconstruire.Add((cx, cz, sec - 1));
-		if (localY == 15 && sec + 1 < 16) _sectionsAReconstruire.Add((cx, cz, sec + 1));
+		if (localY == 15 && sec + 1 < 45) _sectionsAReconstruire.Add((cx, cz, sec + 1));
 		if (localX == TailleChunk - 1) _sectionsAReconstruire.Add((cx + 1, cz, sec));
 		if (localZ == TailleChunk - 1) _sectionsAReconstruire.Add((cx, cz + 1, sec));
 	}

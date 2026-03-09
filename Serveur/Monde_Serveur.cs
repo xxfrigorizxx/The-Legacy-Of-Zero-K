@@ -406,13 +406,16 @@ public partial class Monde_Serveur : Node
 	private const int RAYON_ACTIVATION_PIERRES_CHUNKS = 2;
 	private const int ID_PETITE_PIERRE = 10;
 
-	/// <summary>Délai de synchronisation : attend 2 frames physiques avant d'ensemencer progressivement.</summary>
+	/// <summary>Délai de synchronisation : attend 2 frames physiques, puis enfile sur le tapis roulant (ordre spatial logique).</summary>
 	private async void DeclencherEnsemencement(Vector2I chunkCoord, Chunk_Serveur chunk, float tailleChunk)
 	{
 		await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame);
 		await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame);
 		var positionsFiltrees = CollecterPositionsEnsemencement(chunkCoord, chunk, tailleChunk);
-		await EnsemencerChunkProgressivement(positionsFiltrees);
+		var aEnfiler = new List<(Vector3 pos, int id, int indexCache, int indexChimique)>();
+		foreach (var (pos, id) in positionsFiltrees)
+			aEnfiler.Add((pos, id, -1, -1));
+		EnfilerPierresSurTapisRoulant(aEnfiler);
 	}
 
 	private const int ID_SILEX = 11;
@@ -470,14 +473,20 @@ public partial class Monde_Serveur : Node
 		return liste;
 	}
 
-	/// <summary>Goutte-à-goutte : un objet par frame physique pour éradiquer le lag spike.</summary>
-	private async Task EnsemencerChunkProgressivement(List<(Vector3 pos, int id)> positionsFiltrees)
+	/// <summary>Enfile cailloux et silex sur le tapis roulant en ordre spatial logique (X, Z, Y) : terrain cohérent.</summary>
+	private void EnfilerPierresSurTapisRoulant(List<(Vector3 pos, int id, int indexCache, int indexChimique)> pierres)
 	{
-		foreach (var (pos, id) in positionsFiltrees)
+		if (pierres.Count == 0) return;
+		pierres.Sort((a, b) =>
 		{
-			GenererItemPhysique(pos, id);
-			await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame);
-		}
+			int cmpX = a.pos.X.CompareTo(b.pos.X);
+			if (cmpX != 0) return cmpX;
+			int cmpZ = a.pos.Z.CompareTo(b.pos.Z);
+			if (cmpZ != 0) return cmpZ;
+			return a.pos.Y.CompareTo(b.pos.Y);
+		});
+		foreach (var p in pierres)
+			_filePierresAInstancier.Enqueue((p.pos, p.id, p.indexCache, p.indexChimique));
 	}
 
 	/// <summary>Unification lithique : Silex et Caillou ont exactement les mêmes paramètres RigidBody3D (Mass, Friction, Bounce). Seule la chimie visuelle diffère (ItemPhysique).</summary>
@@ -572,7 +581,7 @@ public partial class Monde_Serveur : Node
 		catch (Exception ex) { GD.PrintErr($"ZERO-K : Erreur sauvegarde pierres chunk {coord} : {ex.Message}"); }
 	}
 
-	/// <summary>Charge et enfile les pierres (spawn quand chunk dessiné à l'écran). v1/v2/v3.</summary>
+	/// <summary>Charge et enfile les pierres sur le tapis roulant (ordre spatial logique X,Z,Y). v1/v2/v3.</summary>
 	private bool ChargerEtSpawnerPierresChunk(Vector2I coord)
 	{
 		if (_parentPourBlocsChutants == null) return false;
@@ -581,6 +590,7 @@ public partial class Monde_Serveur : Node
 		if (!File.Exists(chemin)) return false;
 		try
 		{
+			var pierres = new List<(Vector3 pos, int id, int indexCache, int indexChimique)>();
 			using (var stream = File.Open(chemin, FileMode.Open, System.IO.FileAccess.Read, FileShare.Read))
 			using (var r = new BinaryReader(stream))
 			{
@@ -595,9 +605,10 @@ public partial class Monde_Serveur : Node
 					int indexCache = formatV2 || formatV3 ? r.ReadByte() : -1;
 					int indexChimique = formatV3 ? r.ReadByte() : -1;
 					if (id >= 10 && id <= 14)
-						_filePierresAInstancier.Enqueue((new Vector3(x, y, z), id, indexCache, indexChimique));
+						pierres.Add((new Vector3(x, y, z), id, indexCache, indexChimique));
 				}
 			}
+			EnfilerPierresSurTapisRoulant(pierres);
 			return true;
 		}
 		catch (Exception ex) { GD.PrintErr($"ZERO-K : Erreur chargement pierres chunk {coord} : {ex.Message}"); return false; }
@@ -718,7 +729,7 @@ public partial class Monde_Serveur : Node
 		if (!r.HasValue) return;
 		int cx = Mathf.FloorToInt(pos.X / (float)TailleChunk);
 		int cz = Mathf.FloorToInt(pos.Z / (float)TailleChunk);
-		int sec = Mathf.Clamp(Mathf.FloorToInt(pos.Y / 16f), 0, 15);
+		int sec = Mathf.Clamp(Mathf.FloorToInt(pos.Y / 16f), 0, 44);  // 45 sections (0-44) pour HauteurMax 720
 		int lx = pos.X - cx * TailleChunk;
 		int lz = pos.Z - cz * TailleChunk;
 		_onChunkModifie?.Invoke(new Vector2I(cx, cz), new List<int> { sec });
