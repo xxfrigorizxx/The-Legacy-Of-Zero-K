@@ -100,7 +100,41 @@ public partial class ItemPhysique : Node3D
 		RotationDegrees = new Vector3(GD.RandRange(0, 360), GD.RandRange(0, 360), GD.RandRange(0, 360));
 	}
 
-	private int PreparerCacheEtTirerIndex(bool estSilex)
+	/// <summary>Réapplique mesh/collision/matériau après réutilisation depuis un pool (ID_Objet ou IndexCache/Chimique changés).</summary>
+	public void ReappliquerApparence()
+	{
+		Node parent = GetParent();
+		if (parent == null) return;
+		MeshInstance3D visuel = null;
+		CollisionShape3D hitbox = null;
+		foreach (Node child in parent.GetChildren())
+		{
+			if (child is MeshInstance3D mi) visuel = mi;
+			else if (child is CollisionShape3D cs) hitbox = cs;
+		}
+		if (visuel == null || hitbox == null) return;
+		if (IndexChimique < 0) IndexChimique = GD.RandRange(0, TableGeologique.Length - 1);
+		AppliquerMateriel(visuel);
+		if (IndexCacheMemoire < 0)
+		{
+			// -1 = proche du joueur (formes douces, 1re moitié), -2 = loin (formes plus cassées, 2e moitié)
+			bool formesCassées = (IndexCacheMemoire == -2);
+			IndexCacheMemoire = ID_Objet == 11 ? PreparerCacheEtTirerIndex(true, formesCassées) : PreparerCacheEtTirerIndex(false, formesCassées);
+		}
+		int idx = Mathf.Clamp(IndexCacheMemoire, 0, int.MaxValue);
+		if (ID_Objet == 11)
+		{
+			if (idx < _cacheMeshSilex.Count) { visuel.Mesh = _cacheMeshSilex[idx]; hitbox.Shape = _cacheCollisionSilex[idx]; }
+		}
+		else
+		{
+			if (idx < _cacheMeshCaillou.Count) { visuel.Mesh = _cacheMeshCaillou[idx]; hitbox.Shape = _cacheCollisionCaillou[idx]; }
+			float scale = ID_Objet == 10 ? 1f : ID_Objet == 12 ? 0.25f / 0.15f : ID_Objet == 13 ? 0.4f / 0.15f : 0.6f / 0.15f;
+			if (parent is Node3D n3d) n3d.Scale = new Vector3(scale, scale, scale);
+		}
+	}
+
+	private int PreparerCacheEtTirerIndex(bool estSilex, bool formesCassées = false)
 	{
 		if (estSilex)
 		{
@@ -108,14 +142,20 @@ public partial class ItemPhysique : Node3D
 			{
 				if (_cacheMeshSilex.Count < NbVariationsCache)
 					GenererEtMettreEnCache(true);
-				return GD.RandRange(0, Mathf.Max(0, _cacheMeshSilex.Count - 1));
+				int count = _cacheMeshSilex.Count;
+				if (count == 0) return 0;
+				if (formesCassées && count > 1) return GD.RandRange(count / 2, count - 1);
+				return GD.RandRange(0, Mathf.Max(0, (count / 2) - 1));
 			}
 		}
 		lock (_cacheMeshCaillou)
 		{
 			if (_cacheMeshCaillou.Count < NbVariationsCache)
 				GenererEtMettreEnCache(false);
-			return GD.RandRange(0, Mathf.Max(0, _cacheMeshCaillou.Count - 1));
+			int count = _cacheMeshCaillou.Count;
+			if (count == 0) return 0;
+			if (formesCassées && count > 1) return GD.RandRange(count / 2, count - 1);
+			return GD.RandRange(0, Mathf.Max(0, (count / 2) - 1));
 		}
 	}
 

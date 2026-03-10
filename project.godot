@@ -94,7 +94,8 @@ interagir={
 [physics]
 
 3d/physics_engine="Jolt Physics"
-jolt_physics_3d/limits/temporary_memory_buffer_size=320000000000
+; Mémoire temporaire Jolt en octets : 256 MiB
+jolt_physics_3d/limits/temporary_memory_buffer_size=268435456
 jolt_physics_3d/limits/max_bodies=10240000
 jolt_physics_3d/limits/max_body_pairs=65536000
 jolt_physics_3d/limits/max_contact_constraints=20480000

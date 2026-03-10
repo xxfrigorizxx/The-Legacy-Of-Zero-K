@@ -61,8 +61,17 @@ public partial class Monde_Serveur : Node
 	private Queue<(Vector3 pos, int id, int indexCache, int indexChimique)> _filePierresAInstancier = new Queue<(Vector3, int, int, int)>();
 	private const int MaxPierresParFrame = 12;
 
+	/// <summary>Pools de roches par taille (ID 10–14). Limite 50 par catégorie. Plus loin du joueur → formes plus cassées (2e moitié du cache).</summary>
+	private Dictionary<int, List<RigidBody3D>> _poolsRochesParTaille = new Dictionary<int, List<RigidBody3D>>();
+	private const int TaillePoolParType = 50;
+	/// <summary>En deçà de cette distance au niveau d'eau (Y=103) : formes douces. Au-delà (hautes montagnes ou profondeur) : formes plus cassées.</summary>
+	private const float SeuilDistanceEauFormesCassées = 25f;
+
 	private float _tempsDepuisVerifDecharge;
 	private const float IntervalleEvaluationTectonique = 0.5f;
+	/// <summary>Tapis roulant décharge : au plus N chunks sauvegardés/déchargés par frame (évite lag).</summary>
+	private const int MaxChunksDechargeParTick = 2;
+	private List<Vector2I> _chunksEnAttenteDecharge = new List<Vector2I>();
 
 	public void Initialiser(Node parentPourBlocsChutants, Action<Vector2I, List<int>> onChunkModifie, Action<Vector2I, DonneesChunk> onEnvoyerChunk = null, Action<Vector2I, Dictionary<Vector3I, byte>> onFloreModifie = null, Action<Vector3I, byte> onVoxelModifie = null, Action<Vector2I> onOrdonnerDestructionChunk = null, Func<Vector3> obtenirPositionJoueur = null)
 	{
@@ -76,6 +85,7 @@ public partial class Monde_Serveur : Node
 		string nom = GameState.Instance?.NomMondeActuel ?? "MonMonde";
 		DirAccess.MakeDirRecursiveAbsolute($"user://saves/{nom}/chunks");
 		GD.Print($"ZERO-K : Dossier chunks actif = user://saves/{nom}/chunks/ (lecture ET écriture)");
+		CreerPoolsRochesParTaille();
 	}
 
 	/// <summary>Sauvegarde d'urgence : sauvegarde uniquement les chunks modifiés (EstModifie).</summary>
@@ -221,6 +231,13 @@ public partial class Monde_Serveur : Node
 		while (nPierres < MaxPierresParFrame && _filePierresAInstancier.Count > 0)
 		{
 			var (pos, id, idx, chim) = _filePierresAInstancier.Dequeue();
+			// Plus la roche est loin du niveau d'eau (Y=103), plus elle peut prendre une forme cassée (2e moitié du cache)
+			if (idx < 0)
+			{
+				float distEau = Mathf.Abs(pos.Y - NIVEAU_EAU);
+				bool formesCassées = distEau > SeuilDistanceEauFormesCassées;
+				idx = formesCassées ? -2 : -1;
+			}
 			GenererItemPhysique(pos, id, idx, chim);
 			nPierres++;
 		}
@@ -235,6 +252,9 @@ public partial class Monde_Serveur : Node
 			_tempsDepuisVerifDecharge = 0f;
 			EvaluerDechargementChunks();
 		}
+
+		// Tapis roulant décharge : N chunks par frame (sauvegarde + décharge progressifs)
+		ProcesserDechargeProgressive();
 
 		int n = Math.Min(_fileEau.Count, MaxEauParTick);
 		for (int i = 0; i < n; i++)
@@ -423,6 +443,23 @@ public partial class Monde_Serveur : Node
 	private const int ID_GROSSE_PIERRE = 13;
 	private const int ID_TRES_GROSSE_PIERRE = 14;
 
+	/// <summary>Pré-crée les pools par taille (chunk en génération lance le dé → on prend une du pool de cette taille).</summary>
+	private void CreerPoolsRochesParTaille()
+	{
+		if (_parentPourBlocsChutants == null) return;
+		int[] ids = { ID_PETITE_PIERRE, ID_SILEX, ID_PIERRE_MOYENNE, ID_GROSSE_PIERRE, ID_TRES_GROSSE_PIERRE };
+		foreach (int id in ids)
+		{
+			_poolsRochesParTaille[id] = new List<RigidBody3D>();
+			for (int i = 0; i < TaillePoolParType; i++)
+			{
+				var rb = CreerNouvelleRoche(id, -1, -1);
+				_poolsRochesParTaille[id].Add(rb);
+			}
+		}
+		GD.Print($"ZERO-K : Pools roches par taille créés ({ids.Length} x {TaillePoolParType}).");
+	}
+
 	/// <summary>Collecte les positions et IDs à ensemencer (sans instancier).</summary>
 	private List<(Vector3 pos, int id)> CollecterPositionsEnsemencement(Vector2I chunkCoord, Chunk_Serveur chunk, float tailleChunk)
 	{
@@ -489,10 +526,34 @@ public partial class Monde_Serveur : Node
 			_filePierresAInstancier.Enqueue((p.pos, p.id, p.indexCache, p.indexChimique));
 	}
 
-	/// <summary>Unification lithique : Silex et Caillou ont exactement les mêmes paramètres RigidBody3D (Mass, Friction, Bounce). Seule la chimie visuelle diffère (ItemPhysique).</summary>
+	/// <summary>Roches liées au chunk : à la génération le chunk lance le dé → taille → on prend une du pool de cette taille (sinon on en crée une). IndexCache -1 = proche (formes douces), -2 = loin (formes cassées).</summary>
 	private void GenererItemPhysique(Vector3 position, int idObjet, int indexCache = -1, int indexChimique = -1)
 	{
 		if (_parentPourBlocsChutants == null) return;
+		RigidBody3D rb = null;
+		if (_poolsRochesParTaille.TryGetValue(idObjet, out var pool) && pool.Count > 0)
+		{
+			rb = pool[pool.Count - 1];
+			pool.RemoveAt(pool.Count - 1);
+			var item = rb.GetNodeOrNull<ItemPhysique>("ItemPhysique");
+			if (item != null)
+			{
+				item.ID_Objet = idObjet;
+				item.IndexCacheMemoire = indexCache;
+				item.IndexChimique = indexChimique;
+				item.ReappliquerApparence();
+			}
+			rb.Freeze = true;
+		}
+		else
+			rb = CreerNouvelleRoche(idObjet, indexCache, indexChimique);
+		_parentPourBlocsChutants.AddChild(rb);
+		rb.GlobalPosition = position;
+	}
+
+	/// <summary>Crée une roche neuve (mesh/collision selon id). N'est pas ajoutée au parent.</summary>
+	private RigidBody3D CreerNouvelleRoche(int idObjet, int indexCache, int indexChimique)
+	{
 		float rayon = idObjet == ID_SILEX ? 0.12f
 			: idObjet == ID_PETITE_PIERRE ? 0.15f
 			: idObjet == ID_PIERRE_MOYENNE ? 0.25f
@@ -503,7 +564,7 @@ public partial class Monde_Serveur : Node
 		var rb = new RigidBody3D();
 		rb.Mass = 1.0f;
 		rb.PhysicsMaterialOverride = new PhysicsMaterial { Friction = 0.6f, Bounce = 0.1f };
-		rb.Freeze = true; // Dormance pour toutes (réveil dans rayon)
+		rb.Freeze = true;
 
 		Mesh meshBase = idObjet == ID_SILEX ? new PrismMesh { Size = new Vector3(0.2f, 0.15f, 0.25f) } : new SphereMesh { Radius = rayon, Height = hauteur };
 		Shape3D shapeBase = idObjet == ID_SILEX ? new BoxShape3D { Size = new Vector3(0.2f, 0.15f, 0.25f) } : new SphereShape3D { Radius = rayon };
@@ -511,8 +572,7 @@ public partial class Monde_Serveur : Node
 		rb.AddChild(new CollisionShape3D { Shape = shapeBase });
 		var item = new ItemPhysique { ID_Objet = idObjet, IndexCacheMemoire = indexCache, IndexChimique = indexChimique, Name = "ItemPhysique" };
 		rb.AddChild(item);
-		_parentPourBlocsChutants.AddChild(rb);
-		rb.GlobalPosition = position;
+		return rb;
 	}
 
 	/// <summary>Rayon en unités : pierres gelées se réveillent quand joueur entre (2 chunks = terrain chargé).</summary>
@@ -614,7 +674,7 @@ public partial class Monde_Serveur : Node
 		catch (Exception ex) { GD.PrintErr($"ZERO-K : Erreur chargement pierres chunk {coord} : {ex.Message}"); return false; }
 	}
 
-	/// <summary>Retire du monde les pierres/silex dont la position est dans le chunk (évite doublons au rechargement).</summary>
+	/// <summary>Retire du monde les pierres/silex dont la position est dans le chunk ; remet dans le pool de la taille si possible.</summary>
 	private void RetirerPierresChunk(Vector2I coord)
 	{
 		if (_parentPourBlocsChutants == null) return;
@@ -633,7 +693,18 @@ public partial class Monde_Serveur : Node
 				aRetirer.Add(child);
 		}
 		foreach (var n in aRetirer)
-			n.QueueFree();
+		{
+			var item = n.GetNodeOrNull<ItemPhysique>("ItemPhysique");
+			int id = item?.ID_Objet ?? 0;
+			_parentPourBlocsChutants.RemoveChild(n);
+			if (n is RigidBody3D rb && id >= 10 && id <= 14 && _poolsRochesParTaille.TryGetValue(id, out var pool) && pool.Count < TaillePoolParType)
+			{
+				rb.Freeze = true;
+				pool.Add(rb);
+			}
+			else
+				n.QueueFree();
+		}
 	}
 
 	public void AppliquerDestructionGlobale(Vector3 pointImpact, float rayon, int peerDemandeur = -1)
@@ -802,19 +873,28 @@ public partial class Monde_Serveur : Node
 			if (dx > RenderDistance || dz > RenderDistance)
 				aDecharger.Add(kv.Key);
 		}
+		// Enfiler sur le tapis roulant : le déchargement sera fait progressivement par ProcesserDechargeProgressive
+		_chunksEnAttenteDecharge = aDecharger;
+	}
 
-		foreach (Vector2I coord in aDecharger)
+	/// <summary>Traite au plus MaxChunksDechargeParTick chunks : sauvegarde (voxels + pierres) puis décharge (retrait pierres, Remove chunk, notif client).</summary>
+	private void ProcesserDechargeProgressive()
+	{
+		if (_chunksEnAttenteDecharge.Count == 0 || _onOrdonnerDestructionChunk == null) return;
+		int traites = 0;
+		while (traites < MaxChunksDechargeParTick && _chunksEnAttenteDecharge.Count > 0)
 		{
+			Vector2I coord = _chunksEnAttenteDecharge[0];
+			_chunksEnAttenteDecharge.RemoveAt(0);
 			if (_chunks.TryGetValue(coord, out var chunk))
 			{
-				// Toujours sauvegarder à la décharge : écraser la save avec l'état actuel
 				chunk.SauvegarderChunkSurDisque();
-				SauvegarderPierresChunk(coord); // Remettre les cailloux qu'on avait
-				RetirerPierresChunk(coord);     // Retirer de la scène pour éviter doublons au rechargement
+				SauvegarderPierresChunk(coord);
+				RetirerPierresChunk(coord);
 				_chunks.Remove(coord);
 				_onOrdonnerDestructionChunk(coord);
+				traites++;
 			}
 		}
 	}
 }
-
