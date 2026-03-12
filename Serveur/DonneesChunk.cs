@@ -48,7 +48,17 @@ public partial class DonneesChunk : RefCounted
 		return result;
 	}
 
-	/// <summary>Déquantifie byte[] vers float[,,]. À appeler dans Task.Run (background).</summary>
+	/// <summary>Déquantifie byte[] vers float[] plat (x + y*tx + z*tx*ty). Plus rapide que [,,] en C#.</summary>
+	public static float[] DecompresserDensitesFlat(byte[] densitesPlates, int tailleX, int tailleY, int tailleZ)
+	{
+		int size = tailleX * tailleY * tailleZ;
+		var result = new float[size];
+		for (int i = 0; i < size; i++)
+			result[i] = (densitesPlates[i] / 127.5f - 1f) * EchelleQuantification;
+		return result;
+	}
+
+	/// <summary>Déquantifie byte[] vers float[,,]. À appeler dans Task.Run (background). Conservé pour compatibilité serveur.</summary>
 	public static float[,,] DecompresserDensites(byte[] densitesPlates, int tailleX, int tailleY, int tailleZ)
 	{
 		var result = new float[tailleX, tailleY, tailleZ];

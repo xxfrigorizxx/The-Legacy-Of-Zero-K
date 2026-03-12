@@ -4,6 +4,30 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
+/// <summary>Paquet pour une section de chunk : uniquement des données C# pures (aucune ressource Godot). Produit par le Task.Run, consommé par le Main Thread.</summary>
+public class SectionPayload
+{
+	public Vector3[] SommetsVisuels;
+	public Vector3[] NormalsVisuels;
+	public Color[] CouleursVisuels;
+	public Vector3[] SommetsEau;
+	public Vector3[] NormalsEau;
+}
+
+/// <summary>Paquet flore précalculé dans le Task.Run : positions et couleurs pour un seul passage MultiMesh (évite AddChild désynchronisé).</summary>
+public class ChunkFlorePayload
+{
+	public List<(Transform3D T, Color C, Vector3 PosMonde)> Gazon;
+	public List<Transform3D> BuissonPlein;
+	public List<Transform3D> BuissonVide;
+}
+
+/// <summary>Paquet pour cailloux physiques : positions précalculées, spawn dilué (1-2 par frame) sur le Main Thread.</summary>
+public class ChunkCaillouxPayload
+{
+	public List<Transform3D> Positions = new List<Transform3D>();
+}
+
 /// <summary>Détient MeshInstance3D, CollisionShape3D. Reçoit des données et les transforme en triangles. Aucun bruit fractal.</summary>
 public partial class Chunk_Client : Node3D
 {
@@ -37,16 +61,27 @@ public partial class Chunk_Client : Node3D
 
 	[Export] public Material MaterielTerre;
 
-	private float[,,] _densities;
-	private byte[,,] _materials;
-	private float[,,] _densitiesEau;
+	private float[] _densitiesFlat;
+	private byte[] _materialsFlat;
+	private float[] _densitiesEauFlat;
+	/// <summary>Dimensions des tableaux plats : tx = TailleChunk+1, ty = HauteurMax+1, tz = TailleChunk+1.</summary>
+	private int _tx, _ty, _tz;
+
+	/// <summary>Index 1D aligné sur DonneesChunk (serveur) : x*Ty*Tz + y*Tz + z. Cohérent avec CompresserDensitesPourReseau / DecompresserDensitesFlat.</summary>
+	private int Idx(int x, int y, int z) => x * _ty * _tz + y * _tz + z;
 	private FastNoiseLite _noiseTemperature;
 	private FastNoiseLite _noiseHumidite;
 	private Dictionary<Vector3I, byte> _inventaireFloreEnAttente;
 	private Dictionary<Vector3I, byte> _inventaireFloreCache;
+	private ChunkFlorePayload _payloadFloreCache;
+	private ChunkCaillouxPayload _payloadCaillouxCache;
 	private int _frameFlore;
 	/// <summary>Rayon en chunks : seul le gazon (grass.glb) est visible dans cette zone autour du joueur. Les buissons restent visibles partout.</summary>
-	private const int RAYON_GAZON_CHUNKS = 2;
+	private const int RAYON_GAZON_CHUNKS = 1;
+	/// <summary>Au-delà de ce rayon (en chunks), le chunk reste affiché mais est "dormant" : pas de physique ni collision.</summary>
+	private const int RAYON_CHUNK_ACTIF_CHUNKS = 2;
+
+	private bool _dormant;
 
 	public override void _Ready()
 	{
@@ -114,75 +149,66 @@ public partial class Chunk_Client : Node3D
 		_noiseHumidite.Frequency = 0.0006f;
 	}
 
-	/// <summary>Reçoit les données du serveur. Stocke _densities/_materials en RAM AVANT toute construction visuelle. Meshes en goutte-à-goutte (MaxMeshesParFrame) pour éviter Upload Stall VRAM.</summary>
-	public void RecevoirDonneesChunk(DonneesChunk donnees, Action<System.Action> enqueueMainThread)
+	/// <summary>Exécute le calcul lourd (décompression + flore + 45 sections) dans le worker. Appelé par Monde_Client depuis Task.Run. Une seule tâche = un chunk entier (pas de sous-tasks).</summary>
+	public void ExecuterCalculChunk(DonneesChunk donnees, Action<Action> enqueueIntegration)
 	{
 		if (donnees.MaterialsFlat == null) return;
 		bool formatQuantifie = donnees.DensitiesQuantifiees != null;
-
 		int tx = donnees.TailleChunk + 1, ty = donnees.HauteurMax + 1, tz = donnees.TailleChunk + 1;
-		int tc = donnees.TailleChunk, hm = donnees.HauteurMax;
-		// Position GLOBALE du chunk (évite tiling) : coordChunk * tailleChunk
-		float baseX = donnees.CoordChunk.X * tc;
-		float baseZ = donnees.CoordChunk.Y * tc;
+		float baseX = donnees.CoordChunk.X * (float)donnees.TailleChunk;
+		float baseZ = donnees.CoordChunk.Y * (float)donnees.TailleChunk;
 
-		// CRITIQUE : Décompression + Marching Cubes dans Task.Run, jamais sur Main Thread
-		Task.Run(() =>
+		if (formatQuantifie)
 		{
-			if (formatQuantifie)
-			{
-				_densities = DonneesChunk.DecompresserDensites(donnees.DensitiesQuantifiees, tx, ty, tz);
-				_densitiesEau = donnees.DensitiesEauQuantifiees != null
-					? DonneesChunk.DecompresserDensites(donnees.DensitiesEauQuantifiees, tx, ty, tz)
-					: null;
-			}
-			else
-			{
-				_densities = new float[tx, ty, tz];
-				_densitiesEau = donnees.DensitiesEauFlat != null ? new float[tx, ty, tz] : null;
-				int idx = 0;
-				for (int x = 0; x < tx; x++)
-					for (int y = 0; y < ty; y++)
-						for (int z = 0; z < tz; z++)
-						{
-							_densities[x, y, z] = donnees.DensitiesFlat[idx];
-							if (_densitiesEau != null) _densitiesEau[x, y, z] = donnees.DensitiesEauFlat[idx];
-							idx++;
-						}
-			}
+			_densitiesFlat = DonneesChunk.DecompresserDensitesFlat(donnees.DensitiesQuantifiees, tx, ty, tz);
+			_densitiesEauFlat = donnees.DensitiesEauQuantifiees != null
+				? DonneesChunk.DecompresserDensitesFlat(donnees.DensitiesEauQuantifiees, tx, ty, tz)
+				: null;
+		}
+		else
+		{
+			_densitiesFlat = (float[])donnees.DensitiesFlat.Clone();
+			_densitiesEauFlat = donnees.DensitiesEauFlat != null ? (float[])donnees.DensitiesEauFlat.Clone() : null;
+		}
+		_tx = tx; _ty = ty; _tz = tz;
+		_materialsFlat = (byte[])donnees.MaterialsFlat.Clone();
 
-			int idxMat = 0;
-			_materials = new byte[tx, ty, tz];
-			for (int x = 0; x < tx; x++)
-				for (int y = 0; y < ty; y++)
-					for (int z = 0; z < tz; z++)
-						_materials[x, y, z] = donnees.MaterialsFlat[idxMat++];
+		_inventaireFloreEnAttente = donnees.InventaireFlore;
+		var invFlore = donnees.InventaireFlore;
+		var chunkRef = this;
+		if (invFlore != null && invFlore.Count > 0)
+		{
+			var payload = ConstruirePayloadFloreEnBackground(invFlore, (float)(donnees.CoordChunk.X * donnees.TailleChunk), (float)(donnees.CoordChunk.Y * donnees.TailleChunk));
+			enqueueIntegration?.Invoke(() => chunkRef.AppliquerPayloadFlore(payload));
+		}
+		else
+			enqueueIntegration?.Invoke(() => chunkRef.AppliquerPayloadFlore(null));
 
-			_inventaireFloreEnAttente = donnees.InventaireFlore;
-			// CallDeferred : s'exécute APRÈS AttacherEtPositionnerChunk (fin de frame) — évite race IsInsideTree
-			enqueueMainThread?.Invoke(() => CallDeferred("AppliquerInventaireFloreEnAttente"));
+		// 45 sections en séquence dans ce worker (pas de Task.Run par section)
+		for (int idxSec = 0; idxSec < NB_SECTIONS; idxSec++)
+		{
+			SectionPayload payload = ConstruireSectionPayloadEnBackground(idxSec, baseX, baseZ);
+			int sec = idxSec;
+			enqueueIntegration?.Invoke(() => chunkRef.IntegrerSectionPayload(sec, payload));
+		}
+	}
 
-			for (int i = 0; i < NB_SECTIONS; i++)
-			{
-				int idxSec = i;
-				System.Threading.Tasks.Task.Run(() =>
-				{
-					var (meshTerrain, meshEau) = ConstruireMeshSection(idxSec, baseX, baseZ);
-					enqueueMainThread?.Invoke(() => AppliquerMeshSection(idxSec, meshTerrain, meshEau));
-				});
-			}
-		});
+	/// <summary>Reçoit les données du serveur. Les travaux lourds sont délégués à la Forge restreinte (file d'attente + MaxTravailleurs). Ne lance plus de Task.Run ici.</summary>
+	public void RecevoirDonneesChunk(DonneesChunk donnees, Action<Action> enqueueIntegration)
+	{
+		// Si le monde utilise la Forge restreinte, il appelle EnqueueChunkGeneration au lieu de ceci. Conservé pour appel direct (ex. tests).
+		ExecuterCalculChunk(donnees, enqueueIntegration);
 	}
 
 	/// <summary>Met à jour un voxel aux coordonnées locales (pour réplication du padding des voisins).</summary>
 	public void SetVoxelLocal(int lx, int ly, int lz, byte id)
 	{
-		if (_densities == null || lx < 0 || lx > TailleChunk || ly < 0 || ly > HauteurMax || lz < 0 || lz > TailleChunk) return;
+		if (_densitiesFlat == null || lx < 0 || lx > TailleChunk || ly < 0 || ly > HauteurMax || lz < 0 || lz > TailleChunk) return;
 		if (id == 0)
 		{
-			_densities[lx, ly, lz] = -10f;
-			_materials[lx, ly, lz] = 0;
-			if (_densitiesEau != null) _densitiesEau[lx, ly, lz] = -1f;
+			_densitiesFlat[Idx(lx, ly, lz)] = -10f;
+			_materialsFlat[Idx(lx, ly, lz)] = 0;
+			if (_densitiesEauFlat != null) _densitiesEauFlat[Idx(lx, ly, lz)] = -1f;
 			// Purge flore locale : modèle 3D disparaît immédiatement quand le bloc sous lui est détruit
 			var posGlobale = new Vector3I(ChunkOffsetX * TailleChunk + lx, ly, ChunkOffsetZ * TailleChunk + lz);
 			if (_inventaireFloreCache != null && _inventaireFloreCache.Remove(posGlobale))
@@ -190,35 +216,32 @@ public partial class Chunk_Client : Node3D
 		}
 		else if (id == 4)
 		{
-			_densities[lx, ly, lz] = -10f;
-			_materials[lx, ly, lz] = 4;
-			if (_densitiesEau != null) _densitiesEau[lx, ly, lz] = 1f;
+			_densitiesFlat[Idx(lx, ly, lz)] = -10f;
+			_materialsFlat[Idx(lx, ly, lz)] = 4;
+			if (_densitiesEauFlat != null) _densitiesEauFlat[Idx(lx, ly, lz)] = 1f;
 		}
 		else
 		{
-			_densities[lx, ly, lz] = 10f;
-			_materials[lx, ly, lz] = id;
-			if (_densitiesEau != null) _densitiesEau[lx, ly, lz] = -1f;
+			_densitiesFlat[Idx(lx, ly, lz)] = 10f;
+			_materialsFlat[Idx(lx, ly, lz)] = id;
+			if (_densitiesEauFlat != null) _densitiesEauFlat[Idx(lx, ly, lz)] = -1f;
 		}
 	}
 
 	/// <summary>Applique une mise à jour voxel unique (eau/air/solide) depuis le serveur. Met à jour les données et lève le dirty flag — AUCUN Marching Cubes ici.</summary>
 	public void AppliquerVoxelGlobal(Vector3I posGlobal, byte id)
 	{
-		if (_densities == null) return;
-		int cx = Mathf.FloorToInt(posGlobal.X / (float)TailleChunk);
-		int cz = Mathf.FloorToInt(posGlobal.Z / (float)TailleChunk);
-		if (cx != ChunkOffsetX || cz != ChunkOffsetZ) return;
-		int lx = posGlobal.X - ChunkOffsetX * TailleChunk;
-		int lz = posGlobal.Z - ChunkOffsetZ * TailleChunk;
+		if (_densitiesFlat == null) return;
+		Gestionnaire_Monde.WorldToChunkAndLocal(posGlobal.X, posGlobal.Z, TailleChunk, out Vector2I c, out int lx, out int lz);
+		if (c.X != ChunkOffsetX || c.Y != ChunkOffsetZ) return;
 		int ly = posGlobal.Y;
 		if (lx < 0 || lx > TailleChunk || ly < 0 || ly > HauteurMax || lz < 0 || lz > TailleChunk)
 			return;
 		if (id == 0)
 		{
-			_densities[lx, ly, lz] = -10f;
-			_materials[lx, ly, lz] = 0;
-			if (_densitiesEau != null) _densitiesEau[lx, ly, lz] = -1f;
+			_densitiesFlat[Idx(lx, ly, lz)] = -10f;
+			_materialsFlat[Idx(lx, ly, lz)] = 0;
+			if (_densitiesEauFlat != null) _densitiesEauFlat[Idx(lx, ly, lz)] = -1f;
 			// Purge flore : gazon et buissons disparaissent quand le bloc ID 1 (herbe) est détruit
 			bool floreModifiee = false;
 			if (_inventaireFloreCache != null)
@@ -232,39 +255,40 @@ public partial class Chunk_Client : Node3D
 		}
 		else if (id == 4)
 		{
-			_densities[lx, ly, lz] = -10f;
-			_materials[lx, ly, lz] = 4;
-			if (_densitiesEau != null) _densitiesEau[lx, ly, lz] = 1f;
+			_densitiesFlat[Idx(lx, ly, lz)] = -10f;
+			_materialsFlat[Idx(lx, ly, lz)] = 4;
+			if (_densitiesEauFlat != null) _densitiesEauFlat[Idx(lx, ly, lz)] = 1f;
 		}
 		else
 		{
-			_densities[lx, ly, lz] = 10f;
-			_materials[lx, ly, lz] = id;
-			if (_densitiesEau != null) _densitiesEau[lx, ly, lz] = -1f;
+			_densitiesFlat[Idx(lx, ly, lz)] = 10f;
+			_materialsFlat[Idx(lx, ly, lz)] = id;
+			if (_densitiesEauFlat != null) _densitiesEauFlat[Idx(lx, ly, lz)] = -1f;
 		}
 	}
 
-	/// <summary>Appelé par Monde_Client. Reconstruit une section en Task.Run (tâches de fond).</summary>
+	/// <summary>Appelé par Monde_Client. Reconstruit une section en Task.Run (données pures) puis forge sur le Main Thread.</summary>
 	public void DeclencherReconstructionSection(int indexSection)
 	{
-		if (_densities == null) return;
+		if (_densitiesFlat == null) return;
 		var monde = GetParent() as Monde_Client;
 		if (monde == null) return;
 		float baseX = ChunkOffsetX * TailleChunk;
 		float baseZ = ChunkOffsetZ * TailleChunk;
 		int idx = indexSection;
-		var enqueue = monde.EnqueueMiseAJourMainThread;
+		var chunkRef = this;
+		var enqueue = monde.EnqueueIntegration;
 		Task.Run(() =>
 		{
-			var (meshTerrain, meshEau) = ConstruireMeshSection(idx, baseX, baseZ);
-			enqueue.Invoke(() => AppliquerMeshSection(idx, meshTerrain, meshEau));
+			SectionPayload payload = ConstruireSectionPayloadEnBackground(idx, baseX, baseZ);
+			enqueue.Invoke(() => chunkRef.IntegrerSectionPayload(idx, payload));
 		});
 	}
 
 	/// <summary>Reconstruction synchrone sur le Main Thread (Coupe-File VIP). Évite la ThreadPool Starvation.</summary>
 	public void ReconstruireSectionSynchrone(int indexSection)
 	{
-		if (_densities == null) return;
+		if (_densitiesFlat == null) return;
 		float baseX = ChunkOffsetX * TailleChunk;
 		float baseZ = ChunkOffsetZ * TailleChunk;
 		var (meshTerrain, meshEau) = ConstruireMeshSection(indexSection, baseX, baseZ);
@@ -274,9 +298,9 @@ public partial class Chunk_Client : Node3D
 	/// <summary>Retourne la densité aux coordonnées locales. -10 si hors bornes (pour suture MC aux frontières).</summary>
 	public float ObtenirDensiteLocale(int lx, int ly, int lz)
 	{
-		if (_densities == null || lx < 0 || lx > TailleChunk || ly < 0 || ly > HauteurMax || lz < 0 || lz > TailleChunk)
+		if (_densitiesFlat == null || lx < 0 || lx > TailleChunk || ly < 0 || ly > HauteurMax || lz < 0 || lz > TailleChunk)
 			return -10f;
-		return _densities[lx, ly, lz];
+		return _densitiesFlat[Idx(lx, ly, lz)];
 	}
 
 	/// <summary>Section prête si son CollisionShape3D est construit. Utilisé pour suspendre la gravité au spawn.</summary>
@@ -286,40 +310,130 @@ public partial class Chunk_Client : Node3D
 		return _sectionsPhysiques[section]?.Shape != null;
 	}
 
-	/// <summary>Applique le mesh visuel ET le CollisionShape3D (CRITIQUE : sans ça, le terrain posé serait indestructible).</summary>
+	/// <summary>Active ou désactive la physique du terrain selon la distance au joueur (obsChunkX/Z). Au-delà de RAYON_CHUNK_ACTIF_CHUNKS, le chunk est "dormant" : visuel seul. Protocole d'éveil : réactive Visible, ProcessMode et CollisionShape.Disabled.</summary>
+	public void MettreAJourDormance(int obsChunkX, int obsChunkZ)
+	{
+		int dx = Mathf.Abs(ChunkOffsetX - obsChunkX);
+		int dz = Mathf.Abs(ChunkOffsetZ - obsChunkZ);
+		bool dormant = dx > RAYON_CHUNK_ACTIF_CHUNKS || dz > RAYON_CHUNK_ACTIF_CHUNKS;
+		if (dormant == _dormant) return;
+		_dormant = dormant;
+
+		if (dormant)
+		{
+			Visible = false;
+			ProcessMode = ProcessModeEnum.Disabled;
+			if (_sectionsPhysiques != null)
+			{
+				for (int i = 0; i < _sectionsPhysiques.Length; i++)
+				{
+					var col = _sectionsPhysiques[i];
+					if (col != null) col.Disabled = true;
+					var corps = col?.GetParent() as StaticBody3D;
+					if (corps != null)
+					{
+						corps.SetCollisionLayerValue(1, false);
+						corps.SetCollisionMaskValue(1, false);
+					}
+				}
+			}
+		}
+		else
+		{
+			Visible = true;
+			ProcessMode = ProcessModeEnum.Inherit;
+			SetProcess(true);
+			if (_sectionsPhysiques != null)
+			{
+				for (int i = 0; i < _sectionsPhysiques.Length; i++)
+				{
+					var col = _sectionsPhysiques[i];
+					if (col != null) col.Disabled = false;
+					var corps = col?.GetParent() as StaticBody3D;
+					if (corps != null)
+					{
+						corps.SetCollisionLayerValue(1, true);
+						corps.SetCollisionMaskValue(1, true);
+					}
+				}
+			}
+		}
+	}
+
+	/// <summary>Applique le mesh visuel ET le CollisionShape3D. Hitbox créée sur le Main Thread (CreateTrimeshShape) pour éviter la dépendance à PackedVector3Array.</summary>
 	private void AppliquerMeshSection(int idx, ArrayMesh meshTerrain, ArrayMesh meshEau)
 	{
 		try
 		{
-			if (!IsInsideTree()) return; // Chunk libéré ou arbre en destruction — pas de modification spatiale.
+			if (!IsInsideTree()) return;
 			_sectionsTerrain[idx].Mesh = meshTerrain;
 			_sectionsTerrain[idx].MaterialOverride = MaterielTerre ?? GD.Load<Material>("res://Manteau_Planetaire.tres");
 
-			// ANNIHILATION DU FANTÔME PHYSIQUE : recalcul OBLIGATOIRE de la collision après chaque modification de densité.
-			// CreateTrimeshShape génère un ConcavePolygonShape3D pour le terrain complexe. Sans ça, le RayCast passe au travers.
 			var collisionShape = _sectionsPhysiques[idx];
-			if (collisionShape != null)
+			if (collisionShape != null && meshTerrain != null)
 			{
-				Shape3D nouveauShape = (meshTerrain != null && meshTerrain.GetFaces().Length > 0)
-					? meshTerrain.CreateTrimeshShape()
-					: null;
-				Callable.From(() =>
+				Shape3D nouveauShape = meshTerrain.GetFaces().Length > 0 ? meshTerrain.CreateTrimeshShape() : null;
+				// Appelé depuis la file d'intégration (Main Thread) : pas de CallDeferred.
+				if (IsInsideTree() && collisionShape != null)
 				{
-					if (!IsInsideTree() || collisionShape == null) return;
 					if (collisionShape.Shape != null)
 					{
 						collisionShape.Shape.Dispose();
 						collisionShape.Shape = null;
 					}
 					collisionShape.Shape = nouveauShape;
-				}).CallDeferred();
+				}
 			}
 
-			if (_densitiesEau != null && meshEau != null)
+			if (_densitiesEauFlat != null && meshEau != null)
 				_sectionsEau[idx].Mesh = meshEau;
 		}
 		catch (ObjectDisposedException) { /* Chunk déjà supprimé, ignorer */ }
 		catch (System.Exception) when (IsChunkDisposeException()) { /* Godot/natif : objet libéré */ }
+	}
+
+	/// <summary>Forge sur le Main Thread : transforme un SectionPayload (données pures) en ArrayMesh + shape, puis applique à la section.</summary>
+	private void IntegrerSectionPayload(int idx, SectionPayload payload)
+	{
+		if (payload == null) return;
+		(ArrayMesh meshTerrain, ArrayMesh meshEau) = CreerMeshesDepuisPayload(payload);
+		AppliquerMeshSection(idx, meshTerrain, meshEau);
+	}
+
+	/// <summary>Construit ArrayMesh terrain et eau à partir des tableaux du payload (à appeler uniquement sur le Main Thread).</summary>
+	private static (ArrayMesh terrain, ArrayMesh eau) CreerMeshesDepuisPayload(SectionPayload p)
+	{
+		ArrayMesh meshTerrain = null;
+		ArrayMesh meshEau = null;
+
+		if (p.SommetsVisuels != null && p.SommetsVisuels.Length > 0)
+		{
+			var st = new SurfaceTool();
+			st.Begin(Mesh.PrimitiveType.Triangles);
+			for (int i = 0; i < p.SommetsVisuels.Length; i++)
+			{
+				st.SetNormal(p.NormalsVisuels != null && i < p.NormalsVisuels.Length ? p.NormalsVisuels[i] : Vector3.Up);
+				st.SetColor(p.CouleursVisuels != null && i < p.CouleursVisuels.Length ? p.CouleursVisuels[i] : Colors.White);
+				st.AddVertex(p.SommetsVisuels[i]);
+			}
+			st.GenerateNormals();
+			meshTerrain = st.Commit();
+		}
+
+		if (p.SommetsEau != null && p.SommetsEau.Length > 0)
+		{
+			var stEau = new SurfaceTool();
+			stEau.Begin(Mesh.PrimitiveType.Triangles);
+			for (int i = 0; i < p.SommetsEau.Length; i++)
+			{
+				stEau.SetNormal(p.NormalsEau != null && i < p.NormalsEau.Length ? p.NormalsEau[i] : Vector3.Up);
+				stEau.AddVertex(p.SommetsEau[i]);
+			}
+			stEau.GenerateNormals();
+			meshEau = stEau.Commit();
+		}
+
+		return (meshTerrain, meshEau);
 	}
 
 	private static bool IsChunkDisposeException() => true; // Placeholder pour filtre when
@@ -336,88 +450,129 @@ public partial class Chunk_Client : Node3D
 		catch (ObjectDisposedException) { /* Chunk déjà supprimé */ }
 	}
 
-	/// <summary>Met à jour UNIQUEMENT les MultiMesh (buissons). N'appelle JAMAIS ConstruireMeshSection — isolement absolu du terrain.</summary>
-	public void MettreAJourRenduFlore(Dictionary<Vector3I, byte> inventaire)
+	/// <summary>Construit le paquet flore (transforms + couleurs) dans le Task.Run. N'appelle aucun nœud Godot.</summary>
+	private ChunkFlorePayload ConstruirePayloadFloreEnBackground(Dictionary<Vector3I, byte> inventaire, float originX, float originZ)
 	{
-		_inventaireFloreCache = inventaire;
-		ActualiserFloreAvecDistance();
-	}
-
-	private void ActualiserFloreAvecDistance()
-	{
-		try
+		var payload = new ChunkFlorePayload
 		{
-			var inventaire = _inventaireFloreCache;
-			if (!IsInsideTree() || inventaire == null || inventaire.Count == 0)
-		{
-			if (_mmGazon != null) _mmGazon.Multimesh = null;
-			if (_mmBuissonPlein != null) _mmBuissonPlein.Multimesh = null;
-			if (_mmBuissonVide != null) _mmBuissonVide.Multimesh = null;
-			return;
-		}
-		Vector3 chunkOrigin = GlobalPosition;
-		var pleins = new List<Transform3D>();
-		var vides = new List<Transform3D>();
-		var gazonInstances = new List<(Transform3D t, Color c)>();
-
-		Vector3 posObs = (GetParent() as Monde_Client)?.ObtenirPositionObservation() ?? chunkOrigin;
-		float rayonCarre = (RAYON_GAZON_CHUNKS * TailleChunk) * (RAYON_GAZON_CHUNKS * TailleChunk);
-
+			Gazon = new List<(Transform3D T, Color C, Vector3 PosMonde)>(),
+			BuissonPlein = new List<Transform3D>(),
+			BuissonVide = new List<Transform3D>()
+		};
+		Vector3 chunkOrigin = new Vector3(originX, 0, originZ);
 		foreach (var kv in inventaire)
 		{
-			// Y+0.5 : gazon et buissons sur le dessus du bloc, descendus de 0,5 m (évite gazon sous le sol)
 			Vector3 positionLocale = new Vector3(kv.Key.X, kv.Key.Y + 0.5f, kv.Key.Z) - chunkOrigin + new Vector3(0.5f, 0f, 0.5f);
 			float angle = (float)((kv.Key.X * 73856093 ^ kv.Key.Z * 19349663) % 10000) / 10000f * Mathf.Tau;
 			Vector3 posMonde = new Vector3(kv.Key.X + 0.5f, kv.Key.Y + 0.5f, kv.Key.Z + 0.5f);
 
-			// Gazon : visible uniquement dans 2 chunks du joueur, densité divisée par 2
-			if (posMonde.DistanceSquaredTo(posObs) <= rayonCarre && ((kv.Key.X + kv.Key.Z) & 1) == 0)
+			if (((kv.Key.X + kv.Key.Z) & 1) == 0)
 			{
+				Color couleurSol = ObtenirCouleurTerrainApproxThreadSafe(kv.Key.X, kv.Key.Y, kv.Key.Z);
+				Color couleurHerbe = new Color(couleurSol.R * 0.8f, couleurSol.G * 0.8f, couleurSol.B * 0.8f, 1f).Lerp(new Color(0.7f, 0.8f, 1f), 0.1f);
 				var tGazon = Transform3D.Identity;
 				tGazon.Origin = positionLocale;
 				tGazon.Basis = Basis.Identity.Scaled(new Vector3(EchelleGazon, EchelleGazon, EchelleGazon)).Rotated(Vector3.Up, angle);
-				Color couleurSol = ObtenirCouleurTerrainApprox(kv.Key.X, kv.Key.Y, kv.Key.Z);
-				Color couleurHerbe = new Color(couleurSol.R * 0.8f, couleurSol.G * 0.8f, couleurSol.B * 0.8f, 1f).Lerp(new Color(0.7f, 0.8f, 1f), 0.1f);
-				gazonInstances.Add((tGazon, couleurHerbe));
+				payload.Gazon.Add((tGazon, couleurHerbe, posMonde));
 			}
-
-			// Buissons : échelle déterministe (évite "grossissement" à chaque rafraîchissement)
 			if (kv.Value == 1 || kv.Value == 2)
 			{
 				uint h = (uint)(kv.Key.X * 73856093) ^ (uint)(kv.Key.Z * 19349663) ^ (uint)(kv.Key.Y * 83492791);
-				float echelleBuis = 0.009f + (h % 500) / 500f * 0.004f; // 0.009–0.013 stable
+				float echelleBuis = 0.009f + (h % 500) / 500f * 0.004f;
 				var tBuis = Transform3D.Identity;
 				tBuis.Origin = positionLocale;
 				tBuis.Basis = Basis.Identity.Scaled(new Vector3(echelleBuis, echelleBuis, echelleBuis)).Rotated(Vector3.Up, angle);
-				if (kv.Value == 1) pleins.Add(tBuis);
-				else vides.Add(tBuis);
+				if (kv.Value == 1) payload.BuissonPlein.Add(tBuis);
+				else payload.BuissonVide.Add(tBuis);
 			}
+		}
+		return payload;
+	}
+
+	/// <summary>Version thread-safe de la couleur terrain (utilisée dans Task.Run, pas d'accès nœud).</summary>
+	private Color ObtenirCouleurTerrainApproxThreadSafe(int xGlobal, int yGlobal, int zGlobal)
+	{
+		if (_materialsFlat == null || _noiseTemperature == null || _noiseHumidite == null) return new Color(0.5f, 0.6f, 0.5f);
+		int lx = xGlobal - ChunkOffsetX * TailleChunk;
+		int lz = zGlobal - ChunkOffsetZ * TailleChunk;
+		if (lx < 0 || lx > TailleChunk || yGlobal < 0 || yGlobal > HauteurMax || lz < 0 || lz > TailleChunk)
+			return new Color(0.5f, 0.6f, 0.5f);
+		byte idMat = _materialsFlat[Idx(lx, yGlobal, lz)];
+		float temp = _noiseTemperature.GetNoise2D(xGlobal, zGlobal);
+		float hum = _noiseHumidite.GetNoise2D(xGlobal, zGlobal);
+		float facteurHum = Mathf.Clamp((hum + 1f) * 0.5f, 0f, 1f);
+		Color sec = new Color(1.3f, 0.9f, 0.35f);
+		Color normal = new Color(0.45f, 0.75f, 0.4f);
+		Color humide = new Color(0.25f, 0.55f, 0.3f);
+		Color couleurBase = facteurHum < 0.35f
+			? sec.Lerp(normal, facteurHum / 0.35f)
+			: normal.Lerp(humide, (facteurHum - 0.35f) / 0.65f);
+		return couleurBase;
+	}
+
+	/// <summary>Applique le paquet flore sur le Main Thread : un seul passage MultiMesh (1 Draw Call pour toute la végétation du chunk). Filtre le gazon par distance.</summary>
+	private void AppliquerPayloadFlore(ChunkFlorePayload payload)
+	{
+		try
+		{
+			_payloadFloreCache = payload;
+			if (!IsInsideTree())
+			{
+				if (_mmGazon != null) _mmGazon.Multimesh = null;
+				if (_mmBuissonPlein != null) _mmBuissonPlein.Multimesh = null;
+				if (_mmBuissonVide != null) _mmBuissonVide.Multimesh = null;
+				return;
+			}
+			if (payload == null || (payload.Gazon.Count == 0 && payload.BuissonPlein.Count == 0 && payload.BuissonVide.Count == 0))
+			{
+				if (_mmGazon != null) _mmGazon.Multimesh = null;
+				if (_mmBuissonPlein != null) _mmBuissonPlein.Multimesh = null;
+				if (_mmBuissonVide != null) _mmBuissonVide.Multimesh = null;
+				return;
+			}
+			Vector3 posObs = (GetParent() as Monde_Client)?.ObtenirPositionObservation() ?? GlobalPosition;
+			float rayonCarre = (RAYON_GAZON_CHUNKS * TailleChunk) * (RAYON_GAZON_CHUNKS * TailleChunk);
+			var gazonFiltre = new List<(Transform3D t, Color c)>();
+			foreach (var item in payload.Gazon)
+			{
+				if (item.PosMonde.DistanceSquaredTo(posObs) <= rayonCarre)
+					gazonFiltre.Add((item.T, item.C));
+			}
+			RemplirMultiMeshGazon(gazonFiltre);
+			RemplirMultiMeshBuissons(payload.BuissonPlein, payload.BuissonVide);
+		}
+		catch (ObjectDisposedException) { /* Chunk déjà supprimé */ }
+	}
+
+	private void RemplirMultiMeshGazon(List<(Transform3D t, Color c)> gazonInstances)
+	{
+		if (gazonInstances == null || gazonInstances.Count == 0)
+		{
+			if (_mmGazon != null) _mmGazon.Multimesh = null;
+			return;
 		}
 		Mesh meshGazon = ChargerMeshFlore("res://Modeles/Botanique/grass.glb");
-		if (meshGazon == null && gazonInstances.Count > 0)
-			meshGazon = CreerMeshGazonFallback();
-		if (meshGazon != null && gazonInstances.Count > 0)
+		if (meshGazon == null) meshGazon = CreerMeshGazonFallback();
+		if (meshGazon == null) { _mmGazon.Multimesh = null; return; }
+		var mm = new MultiMesh();
+		mm.TransformFormat = MultiMesh.TransformFormatEnum.Transform3D;
+		mm.UseColors = true;
+		mm.Mesh = meshGazon;
+		mm.InstanceCount = gazonInstances.Count;
+		for (int i = 0; i < gazonInstances.Count; i++)
 		{
-			var mm = new MultiMesh();
-			mm.TransformFormat = MultiMesh.TransformFormatEnum.Transform3D;
-			mm.UseColors = true;
-			mm.Mesh = meshGazon;
-			mm.InstanceCount = gazonInstances.Count;
-			for (int i = 0; i < gazonInstances.Count; i++)
-			{
-				mm.SetInstanceTransform(i, gazonInstances[i].t);
-				mm.SetInstanceColor(i, gazonInstances[i].c);
-			}
-			_mmGazon.Multimesh = mm;
-			_mmGazon.MaterialOverride = ObtenirMaterielGazonSymbiotique();
-			_mmGazon.Visible = true;
+			mm.SetInstanceTransform(i, gazonInstances[i].t);
+			mm.SetInstanceColor(i, gazonInstances[i].c);
 		}
-		else
-		{
-			_mmGazon.Multimesh = null;
-		}
+		_mmGazon.Multimesh = mm;
+		_mmGazon.MaterialOverride = ObtenirMaterielGazonSymbiotique();
+		_mmGazon.Visible = true;
+	}
+
+	private void RemplirMultiMeshBuissons(List<Transform3D> pleins, List<Transform3D> vides)
+	{
 		Mesh meshPlein = ChargerMeshFlore("res://Modeles/Botanique/Buisson_Plein.glb");
-		if (meshPlein != null && pleins.Count > 0)
+		if (meshPlein != null && pleins != null && pleins.Count > 0)
 		{
 			var mm = new MultiMesh();
 			mm.TransformFormat = MultiMesh.TransformFormatEnum.Transform3D;
@@ -428,7 +583,7 @@ public partial class Chunk_Client : Node3D
 		}
 		else _mmBuissonPlein.Multimesh = null;
 		Mesh meshVide = ChargerMeshFlore("res://Modeles/Botanique/Buisson_Vide.glb");
-		if (meshVide != null && vides.Count > 0)
+		if (meshVide != null && vides != null && vides.Count > 0)
 		{
 			var mm = new MultiMesh();
 			mm.TransformFormat = MultiMesh.TransformFormatEnum.Transform3D;
@@ -438,6 +593,95 @@ public partial class Chunk_Client : Node3D
 			_mmBuissonVide.Multimesh = mm;
 		}
 		else _mmBuissonVide.Multimesh = null;
+	}
+
+	/// <summary>Met à jour UNIQUEMENT les MultiMesh (buissons). N'appelle JAMAIS ConstruireMeshSection — isolement absolu du terrain.</summary>
+	public void MettreAJourRenduFlore(Dictionary<Vector3I, byte> inventaire)
+	{
+		_inventaireFloreCache = inventaire;
+		_payloadFloreCache = null; // Force recalcul depuis inventaire si pas encore de payload
+		ActualiserFloreAvecDistance();
+	}
+
+	/// <summary>Lissage temporel : ajoute les cailloux physiques 1-2 par frame pour éviter le Main Thread Blocking (pas de boucle AddChild massive).</summary>
+	private async void AppliquerCaillouxPhysiques(List<Transform3D> positions)
+	{
+		if (positions == null || positions.Count == 0 || !IsInsideTree()) return;
+		const int caillouxParFrame = 2;
+		int compteur = 0;
+		foreach (var pos in positions)
+		{
+			GenererCaillouPhysique(pos);
+			compteur++;
+			if (compteur >= caillouxParFrame)
+			{
+				compteur = 0;
+				await ToSignal(GetTree(), "process_frame");
+				if (!IsInsideTree()) return;
+			}
+		}
+	}
+
+	/// <summary>À surcharger ou appeler depuis le monde : crée un RigidBody3D (caillou/silex) à la position. Par défaut no-op (côté client les pierres sont gérées par le serveur).</summary>
+	protected virtual void GenererCaillouPhysique(Transform3D pos)
+	{
+		// Côté client : les cailloux sont répliqués par le serveur. Pour du spawn local, override ou utiliser un callback depuis Monde_Client.
+	}
+
+	private void ActualiserFloreAvecDistance()
+	{
+		try
+		{
+			if (!IsInsideTree()) return;
+			if (_payloadFloreCache != null)
+			{
+				AppliquerPayloadFlore(_payloadFloreCache);
+				return;
+			}
+			var inventaire = _inventaireFloreCache;
+			if (inventaire == null || inventaire.Count == 0)
+			{
+				if (_mmGazon != null) _mmGazon.Multimesh = null;
+				if (_mmBuissonPlein != null) _mmBuissonPlein.Multimesh = null;
+				if (_mmBuissonVide != null) _mmBuissonVide.Multimesh = null;
+				return;
+			}
+		Vector3 chunkOrigin = GlobalPosition;
+		var pleins = new List<Transform3D>();
+		var vides = new List<Transform3D>();
+		var gazonInstances = new List<(Transform3D t, Color c)>();
+
+		Vector3 posObs = (GetParent() as Monde_Client)?.ObtenirPositionObservation() ?? chunkOrigin;
+		float rayonCarre = (RAYON_GAZON_CHUNKS * TailleChunk) * (RAYON_GAZON_CHUNKS * TailleChunk);
+
+		foreach (var kv in inventaire)
+		{
+			Vector3 positionLocale = new Vector3(kv.Key.X, kv.Key.Y + 0.5f, kv.Key.Z) - chunkOrigin + new Vector3(0.5f, 0f, 0.5f);
+			float angle = (float)((kv.Key.X * 73856093 ^ kv.Key.Z * 19349663) % 10000) / 10000f * Mathf.Tau;
+			Vector3 posMonde = new Vector3(kv.Key.X + 0.5f, kv.Key.Y + 0.5f, kv.Key.Z + 0.5f);
+
+			if (posMonde.DistanceSquaredTo(posObs) <= rayonCarre && ((kv.Key.X + kv.Key.Z) & 1) == 0)
+			{
+				var tGazon = Transform3D.Identity;
+				tGazon.Origin = positionLocale;
+				tGazon.Basis = Basis.Identity.Scaled(new Vector3(EchelleGazon, EchelleGazon, EchelleGazon)).Rotated(Vector3.Up, angle);
+				Color couleurSol = ObtenirCouleurTerrainApprox(kv.Key.X, kv.Key.Y, kv.Key.Z);
+				Color couleurHerbe = new Color(couleurSol.R * 0.8f, couleurSol.G * 0.8f, couleurSol.B * 0.8f, 1f).Lerp(new Color(0.7f, 0.8f, 1f), 0.1f);
+				gazonInstances.Add((tGazon, couleurHerbe));
+			}
+			if (kv.Value == 1 || kv.Value == 2)
+			{
+				uint h = (uint)(kv.Key.X * 73856093) ^ (uint)(kv.Key.Z * 19349663) ^ (uint)(kv.Key.Y * 83492791);
+				float echelleBuis = 0.009f + (h % 500) / 500f * 0.004f;
+				var tBuis = Transform3D.Identity;
+				tBuis.Origin = positionLocale;
+				tBuis.Basis = Basis.Identity.Scaled(new Vector3(echelleBuis, echelleBuis, echelleBuis)).Rotated(Vector3.Up, angle);
+				if (kv.Value == 1) pleins.Add(tBuis);
+				else vides.Add(tBuis);
+			}
+		}
+		RemplirMultiMeshGazon(gazonInstances);
+		RemplirMultiMeshBuissons(pleins, vides);
 		}
 		catch (ObjectDisposedException) { /* Chunk déjà supprimé */ }
 	}
@@ -451,12 +695,12 @@ public partial class Chunk_Client : Node3D
 	/// <summary>Couleur approximative du terrain à (x,y,z) — même formule que TerrainVoxel (temp/hum). Pour herbe symbiotique.</summary>
 	private Color ObtenirCouleurTerrainApprox(int xGlobal, int yGlobal, int zGlobal)
 	{
-		if (_materials == null || _noiseTemperature == null || _noiseHumidite == null) return new Color(0.5f, 0.6f, 0.5f);
+		if (_materialsFlat == null || _noiseTemperature == null || _noiseHumidite == null) return new Color(0.5f, 0.6f, 0.5f);
 		int lx = xGlobal - ChunkOffsetX * TailleChunk;
 		int lz = zGlobal - ChunkOffsetZ * TailleChunk;
 		if (lx < 0 || lx > TailleChunk || yGlobal < 0 || yGlobal > HauteurMax || lz < 0 || lz > TailleChunk)
 			return new Color(0.5f, 0.6f, 0.5f);
-		byte idMat = _materials[lx, yGlobal, lz];
+		byte idMat = _materialsFlat[Idx(lx, yGlobal, lz)];
 		float temp = _noiseTemperature.GetNoise2D(xGlobal, zGlobal);
 		float hum = _noiseHumidite.GetNoise2D(xGlobal, zGlobal);
 		float facteurHum = Mathf.Clamp((hum + 1f) * 0.5f, 0f, 1f);
@@ -632,7 +876,7 @@ public partial class Chunk_Client : Node3D
 		int tx = tc + 1, tz = tc + 1;
 
 		// Rembourrage 17³ : tableau padded, aucune interrogation voisin. Lookup local pur.
-		float DensitePourMesh(int x, int y, int z) => _densities[x, yDebut + y, z];
+		float DensitePourMesh(int x, int y, int z) => _densitiesFlat[Idx(x, yDebut + y, z)];
 
 		if (_valsRecyclables == null) _valsRecyclables = new float[8];
 		if (_vertsRecyclables == null) _vertsRecyclables = new Vector3[8];
@@ -640,7 +884,7 @@ public partial class Chunk_Client : Node3D
 
 		var bufferDensities = ArrayPool<float>.Shared.Rent(TAILLE_MAX_SECTION);
 		var bufferMaterials = ArrayPool<byte>.Shared.Rent(TAILLE_MAX_SECTION);
-		float[] bufferEau = _densitiesEau != null ? ArrayPool<float>.Shared.Rent(TAILLE_MAX_SECTION) : null;
+		float[] bufferEau = _densitiesEauFlat != null ? ArrayPool<float>.Shared.Rent(TAILLE_MAX_SECTION) : null;
 		ArrayMesh meshTerrain = null;
 		ArrayMesh meshEau = null;
 		try
@@ -652,8 +896,8 @@ public partial class Chunk_Client : Node3D
 				{
 					int idx = x * stride + y * tz + z;
 					bufferDensities[idx] = DensitePourMesh(x, y, z);
-					bufferMaterials[idx] = _materials[x, yDebut + y, z];
-					if (bufferEau != null) bufferEau[idx] = _densitiesEau[x, yDebut + y, z];
+					bufferMaterials[idx] = _materialsFlat[Idx(x, yDebut + y, z)];
+					if (bufferEau != null) bufferEau[idx] = _densitiesEauFlat[Idx(x, yDebut + y, z)];
 				}
 
 		float ValD(int x, int y, int z) => bufferDensities[x * stride + y * tz + z];
@@ -821,6 +1065,401 @@ public partial class Chunk_Client : Node3D
 			if (bufferEau != null) ArrayPool<float>.Shared.Return(bufferEau);
 		}
 		return (meshTerrain, meshEau);
+	}
+
+	/// <summary>Construit les données de mesh/collision en arrière-plan sans aucune ressource Godot (listes C# uniquement). Consommé par le Main Thread via CreerMeshesDepuisPayload.</summary>
+	private SectionPayload ConstruireSectionPayloadEnBackground(int indexSection, float baseX, float baseZ)
+	{
+		int yDebut = indexSection * HAUTEUR_SECTION;
+		int yFin = Math.Min(yDebut + HAUTEUR_SECTION, HauteurMax);
+		int tailleY = yFin - yDebut + 1;
+		int tc = TailleChunk;
+		int tx = tc + 1, tz = tc + 1;
+
+		float DensitePourMesh(int x, int y, int z) => _densitiesFlat[Idx(x, yDebut + y, z)];
+
+		if (_valsRecyclables == null) _valsRecyclables = new float[8];
+		if (_vertsRecyclables == null) _vertsRecyclables = new Vector3[8];
+		if (_vertListRecyclables == null) _vertListRecyclables = new Vector3[12];
+
+		var bufferDensities = ArrayPool<float>.Shared.Rent(TAILLE_MAX_SECTION);
+		var bufferMaterials = ArrayPool<byte>.Shared.Rent(TAILLE_MAX_SECTION);
+		float[] bufferEau = _densitiesEauFlat != null ? ArrayPool<float>.Shared.Rent(TAILLE_MAX_SECTION) : null;
+
+		var vertsT = new List<Vector3>();
+		var normsT = new List<Vector3>();
+		var colsT = new List<Color>();
+		List<Vector3> vertsE = bufferEau != null ? new List<Vector3>() : null;
+		List<Vector3> normsE = bufferEau != null ? new List<Vector3>() : null;
+
+		try
+		{
+			int stride = tailleY * tz;
+			for (int x = 0; x < tx; x++)
+				for (int y = 0; y < tailleY; y++)
+					for (int z = 0; z < tz; z++)
+					{
+						int idx = x * stride + y * tz + z;
+						bufferDensities[idx] = DensitePourMesh(x, y, z);
+						bufferMaterials[idx] = _materialsFlat[Idx(x, yDebut + y, z)];
+						if (bufferEau != null) bufferEau[idx] = _densitiesEauFlat[Idx(x, yDebut + y, z)];
+					}
+
+			float ValD(int x, int y, int z) => bufferDensities[x * stride + y * tz + z];
+			byte MatD(int x, int y, int z) => bufferMaterials[x * stride + y * tz + z];
+			float EauD(int x, int y, int z) => bufferEau[x * stride + y * tz + z];
+
+			float[] vals = _valsRecyclables;
+			Vector3[] verts = _vertsRecyclables;
+			var edgeTable = ConstantesMarchingCubes.EdgeTable;
+			var triTable = ConstantesMarchingCubes.TriTable;
+
+			for (int x = 0; x < tc; x++)
+				for (int y = 0; y < yFin - yDebut; y++)
+				{
+					int yG = yDebut + y;
+					for (int z = 0; z < tc; z++)
+					{
+						verts[0] = new Vector3(x, yG, z);
+						verts[1] = new Vector3(x + 1, yG, z);
+						verts[2] = new Vector3(x + 1, yG + 1, z);
+						verts[3] = new Vector3(x, yG + 1, z);
+						verts[4] = new Vector3(x, yG, z + 1);
+						verts[5] = new Vector3(x + 1, yG, z + 1);
+						verts[6] = new Vector3(x + 1, yG + 1, z + 1);
+						verts[7] = new Vector3(x, yG + 1, z + 1);
+
+						vals[0] = ValD(x, y, z);
+						vals[1] = ValD(x + 1, y, z);
+						vals[2] = ValD(x + 1, y + 1, z);
+						vals[3] = ValD(x, y + 1, z);
+						vals[4] = ValD(x, y, z + 1);
+						vals[5] = ValD(x + 1, y, z + 1);
+						vals[6] = ValD(x + 1, y + 1, z + 1);
+						vals[7] = ValD(x, y + 1, z + 1);
+
+						int cubeIndex = 0;
+						for (int i = 0; i < 8; i++)
+							if (vals[i] > Isolevel) cubeIndex |= 1 << i;
+						if (edgeTable[cubeIndex] == 0) continue;
+
+						Vector3[] vertList = _vertListRecyclables;
+						vertList[0] = Interp(verts[0], verts[1], vals[0], vals[1]);
+						vertList[1] = Interp(verts[1], verts[2], vals[1], vals[2]);
+						vertList[2] = Interp(verts[2], verts[3], vals[2], vals[3]);
+						vertList[3] = Interp(verts[3], verts[0], vals[3], vals[0]);
+						vertList[4] = Interp(verts[4], verts[5], vals[4], vals[5]);
+						vertList[5] = Interp(verts[5], verts[6], vals[5], vals[6]);
+						vertList[6] = Interp(verts[6], verts[7], vals[6], vals[7]);
+						vertList[7] = Interp(verts[7], verts[4], vals[7], vals[4]);
+						vertList[8] = Interp(verts[0], verts[4], vals[0], vals[4]);
+						vertList[9] = Interp(verts[1], verts[5], vals[1], vals[5]);
+						vertList[10] = Interp(verts[2], verts[6], vals[2], vals[6]);
+						vertList[11] = Interp(verts[3], verts[7], vals[3], vals[7]);
+
+						byte idMat = MatD(x, y, z);
+						if (idMat == 0)
+						{
+							int sy = y;
+							while (sy > 0 && MatD(x, sy, z) == 0) sy--;
+							idMat = MatD(x, sy, z);
+							if (idMat == 0) idMat = 2;
+						}
+
+						float xGlobal = baseX + x;
+						float zGlobal = baseZ + z;
+						float temp = _noiseTemperature?.GetNoise2D(xGlobal, zGlobal) ?? 0f;
+						float hum = _noiseHumidite?.GetNoise2D(xGlobal, zGlobal) ?? 0f;
+						Color couleurId = new Color(idMat / 255f, (temp + 1f) * 0.5f, (hum + 1f) * 0.5f, 1f);
+
+						for (int i = 0; triTable[cubeIndex, i] != -1; i += 3)
+						{
+							Vector3 v0 = vertList[triTable[cubeIndex, i]];
+							Vector3 v1 = vertList[triTable[cubeIndex, i + 1]];
+							Vector3 v2 = vertList[triTable[cubeIndex, i + 2]];
+							Vector3 n = (v1 - v0).Cross(v2 - v0).Normalized();
+							vertsT.Add(v0); vertsT.Add(v1); vertsT.Add(v2);
+							normsT.Add(n); normsT.Add(n); normsT.Add(n);
+							colsT.Add(couleurId); colsT.Add(couleurId); colsT.Add(couleurId);
+						}
+					}
+				}
+
+			if (bufferEau != null)
+			{
+				if (_valsEauRecyclables == null) _valsEauRecyclables = new float[8];
+				if (_vertsEauRecyclables == null) _vertsEauRecyclables = new Vector3[8];
+				if (_vertListEauRecyclables == null) _vertListEauRecyclables = new Vector3[12];
+
+				float[] valsEau = _valsEauRecyclables;
+				Vector3[] vertsEau = _vertsEauRecyclables;
+				for (int x = 0; x < tc; x++)
+					for (int y = 0; y < yFin - yDebut; y++)
+					{
+						int yG = yDebut + y;
+						for (int z = 0; z < tc; z++)
+						{
+							vertsEau[0] = new Vector3(x, yG, z);
+							vertsEau[1] = new Vector3(x + 1, yG, z);
+							vertsEau[2] = new Vector3(x + 1, yG + 1, z);
+							vertsEau[3] = new Vector3(x, yG + 1, z);
+							vertsEau[4] = new Vector3(x, yG, z + 1);
+							vertsEau[5] = new Vector3(x + 1, yG, z + 1);
+							vertsEau[6] = new Vector3(x + 1, yG + 1, z + 1);
+							vertsEau[7] = new Vector3(x, yG + 1, z + 1);
+							valsEau[0] = EauD(x, y, z);
+							valsEau[1] = EauD(x + 1, y, z);
+							valsEau[2] = EauD(x + 1, y + 1, z);
+							valsEau[3] = EauD(x, y + 1, z);
+							valsEau[4] = EauD(x, y, z + 1);
+							valsEau[5] = EauD(x + 1, y, z + 1);
+							valsEau[6] = EauD(x + 1, y + 1, z + 1);
+							valsEau[7] = EauD(x, y + 1, z + 1);
+							int ci = 0;
+							for (int i = 0; i < 8; i++)
+								if (valsEau[i] > Isolevel) ci |= 1 << i;
+							if (edgeTable[ci] == 0) continue;
+							Vector3[] vl = _vertListEauRecyclables;
+							vl[0] = Interp(vertsEau[0], vertsEau[1], valsEau[0], valsEau[1]);
+							vl[1] = Interp(vertsEau[1], vertsEau[2], valsEau[1], valsEau[2]);
+							vl[2] = Interp(vertsEau[2], vertsEau[3], valsEau[2], valsEau[3]);
+							vl[3] = Interp(vertsEau[3], vertsEau[0], valsEau[3], valsEau[0]);
+							vl[4] = Interp(vertsEau[4], vertsEau[5], valsEau[4], valsEau[5]);
+							vl[5] = Interp(vertsEau[5], vertsEau[6], valsEau[5], valsEau[6]);
+							vl[6] = Interp(vertsEau[6], vertsEau[7], valsEau[6], valsEau[7]);
+							vl[7] = Interp(vertsEau[7], vertsEau[4], valsEau[7], valsEau[4]);
+							vl[8] = Interp(vertsEau[0], vertsEau[4], valsEau[0], valsEau[4]);
+							vl[9] = Interp(vertsEau[1], vertsEau[5], valsEau[1], valsEau[5]);
+							vl[10] = Interp(vertsEau[2], vertsEau[6], valsEau[2], valsEau[6]);
+							vl[11] = Interp(vertsEau[3], vertsEau[7], valsEau[3], valsEau[7]);
+							for (int i = 0; triTable[ci, i] != -1; i += 3)
+							{
+								Vector3 v0 = vl[triTable[ci, i]], v1 = vl[triTable[ci, i + 1]], v2 = vl[triTable[ci, i + 2]];
+								Vector3 n = (v1 - v0).Cross(v2 - v0).Normalized();
+								vertsE.Add(v0); vertsE.Add(v1); vertsE.Add(v2);
+								normsE.Add(n); normsE.Add(n); normsE.Add(n);
+							}
+						}
+					}
+			}
+		}
+		finally
+		{
+			ArrayPool<float>.Shared.Return(bufferDensities);
+			ArrayPool<byte>.Shared.Return(bufferMaterials);
+			if (bufferEau != null) ArrayPool<float>.Shared.Return(bufferEau);
+		}
+
+		return new SectionPayload
+		{
+			SommetsVisuels = vertsT.ToArray(),
+			NormalsVisuels = normsT.ToArray(),
+			CouleursVisuels = colsT.ToArray(),
+			SommetsEau = vertsE?.Count > 0 ? vertsE.ToArray() : null,
+			NormalsEau = normsE?.Count > 0 ? normsE.ToArray() : null
+		};
+	}
+
+	/// <summary>Remplit ChunkData depuis DonneesChunk et construit les 45 SectionPayload (pour architecture AAA / RID). Appelé depuis le worker.</summary>
+	public static List<SectionPayload> RemplirEtConstruirePayloads(ChunkData data, DonneesChunk donnees)
+	{
+		if (donnees?.MaterialsFlat == null) return null;
+		bool formatQuantifie = donnees.DensitiesQuantifiees != null;
+		int tx = donnees.TailleChunk + 1, ty = donnees.HauteurMax + 1, tz = donnees.TailleChunk + 1;
+		float baseX = donnees.CoordChunk.X * (float)donnees.TailleChunk;
+		float baseZ = donnees.CoordChunk.Y * (float)donnees.TailleChunk;
+
+		if (formatQuantifie)
+		{
+			data.DensitiesFlat = DonneesChunk.DecompresserDensitesFlat(donnees.DensitiesQuantifiees, tx, ty, tz);
+			data.DensitiesEauFlat = donnees.DensitiesEauQuantifiees != null
+				? DonneesChunk.DecompresserDensitesFlat(donnees.DensitiesEauQuantifiees, tx, ty, tz)
+				: null;
+		}
+		else
+		{
+			data.DensitiesFlat = (float[])donnees.DensitiesFlat.Clone();
+			data.DensitiesEauFlat = donnees.DensitiesEauFlat != null ? (float[])donnees.DensitiesEauFlat.Clone() : null;
+		}
+		data.Tx = tx; data.Ty = ty; data.Tz = tz;
+		data.MaterialsFlat = (byte[])donnees.MaterialsFlat.Clone();
+		data.TailleChunk = donnees.TailleChunk;
+		data.HauteurMax = donnees.HauteurMax;
+
+		var payloads = new List<SectionPayload>(NB_SECTIONS);
+		for (int i = 0; i < NB_SECTIONS; i++)
+			payloads.Add(ConstruireSectionPayloadEnBackgroundFromData(data, i, baseX, baseZ));
+		return payloads;
+	}
+
+	private const int TAILLE_MAX_SECTION_DATA = 17 * 17 * 17;
+	private const float IsolevelData = 0.0f;
+
+	/// <summary>Construit un SectionPayload à partir de ChunkData (sans Node). Utilise les tableaux plats et le bruit du data.</summary>
+	private static SectionPayload ConstruireSectionPayloadEnBackgroundFromData(ChunkData data, int indexSection, float baseX, float baseZ)
+	{
+		// CAS B : tous les sommets sont en ESPACE LOCAL (x,z dans [0, TailleChunk]). Le placement
+		// de l'instance (Monde_Client.IntegrerChunkDataRIDs) applique UNE SEULE FOIS (cx*TailleChunk, 0, cz*TailleChunk).
+		const int hauteurSection = 16;
+		int yDebut = indexSection * hauteurSection;
+		int yFin = Math.Min(yDebut + hauteurSection, data.HauteurMax);
+		int tailleY = yFin - yDebut + 1;
+		int tc = data.TailleChunk;
+		int tx = tc + 1, tz = tc + 1;
+
+		float DensitePourMesh(int x, int y, int z) => data.DensitiesFlat[data.Idx(x, yDebut + y, z)];
+
+		var bufferDensities = ArrayPool<float>.Shared.Rent(TAILLE_MAX_SECTION_DATA);
+		var bufferMaterials = ArrayPool<byte>.Shared.Rent(TAILLE_MAX_SECTION_DATA);
+		float[] bufferEau = data.DensitiesEauFlat != null ? ArrayPool<float>.Shared.Rent(TAILLE_MAX_SECTION_DATA) : null;
+		var vertsT = new List<Vector3>();
+		var normsT = new List<Vector3>();
+		var colsT = new List<Color>();
+		List<Vector3> vertsE = bufferEau != null ? new List<Vector3>() : null;
+		List<Vector3> normsE = bufferEau != null ? new List<Vector3>() : null;
+		float[] vals = new float[8];
+		Vector3[] verts = new Vector3[8];
+		var vertList = new Vector3[12];
+
+		try
+		{
+			int stride = tailleY * tz;
+			for (int x = 0; x < tx; x++)
+				for (int y = 0; y < tailleY; y++)
+					for (int z = 0; z < tz; z++)
+					{
+						int idx = x * stride + y * tz + z;
+						bufferDensities[idx] = DensitePourMesh(x, y, z);
+						bufferMaterials[idx] = data.MaterialsFlat[data.Idx(x, yDebut + y, z)];
+						if (bufferEau != null) bufferEau[idx] = data.DensitiesEauFlat[data.Idx(x, yDebut + y, z)];
+					}
+
+			float ValD(int x, int y, int z) => bufferDensities[x * stride + y * tz + z];
+			byte MatD(int x, int y, int z) => bufferMaterials[x * stride + y * tz + z];
+			float EauD(int x, int y, int z) => bufferEau[x * stride + y * tz + z];
+
+			var edgeTable = ConstantesMarchingCubes.EdgeTable;
+			var triTable = ConstantesMarchingCubes.TriTable;
+			var noiseT = data.NoiseTemperature;
+			var noiseH = data.NoiseHumidite;
+
+			for (int x = 0; x < tc; x++)
+				for (int y = 0; y < yFin - yDebut; y++)
+				{
+					int yG = yDebut + y;
+					for (int z = 0; z < tc; z++)
+					{
+						verts[0] = new Vector3(x, yG, z);
+						verts[1] = new Vector3(x + 1, yG, z);
+						verts[2] = new Vector3(x + 1, yG + 1, z);
+						verts[3] = new Vector3(x, yG + 1, z);
+						verts[4] = new Vector3(x, yG, z + 1);
+						verts[5] = new Vector3(x + 1, yG, z + 1);
+						verts[6] = new Vector3(x + 1, yG + 1, z + 1);
+						verts[7] = new Vector3(x, yG + 1, z + 1);
+						vals[0] = ValD(x, y, z); vals[1] = ValD(x + 1, y, z); vals[2] = ValD(x + 1, y + 1, z); vals[3] = ValD(x, y + 1, z);
+						vals[4] = ValD(x, y, z + 1); vals[5] = ValD(x + 1, y, z + 1); vals[6] = ValD(x + 1, y + 1, z + 1); vals[7] = ValD(x, y + 1, z + 1);
+						int cubeIndex = 0;
+						for (int i = 0; i < 8; i++)
+							if (vals[i] > IsolevelData) cubeIndex |= 1 << i;
+						if (edgeTable[cubeIndex] == 0) continue;
+						vertList[0] = Interp(verts[0], verts[1], vals[0], vals[1]);
+						vertList[1] = Interp(verts[1], verts[2], vals[1], vals[2]);
+						vertList[2] = Interp(verts[2], verts[3], vals[2], vals[3]);
+						vertList[3] = Interp(verts[3], verts[0], vals[3], vals[0]);
+						vertList[4] = Interp(verts[4], verts[5], vals[4], vals[5]);
+						vertList[5] = Interp(verts[5], verts[6], vals[5], vals[6]);
+						vertList[6] = Interp(verts[6], verts[7], vals[6], vals[7]);
+						vertList[7] = Interp(verts[7], verts[4], vals[7], vals[4]);
+						vertList[8] = Interp(verts[0], verts[4], vals[0], vals[4]);
+						vertList[9] = Interp(verts[1], verts[5], vals[1], vals[5]);
+						vertList[10] = Interp(verts[2], verts[6], vals[2], vals[6]);
+						vertList[11] = Interp(verts[3], verts[7], vals[3], vals[7]);
+						byte idMat = MatD(x, y, z);
+						if (idMat == 0)
+						{
+							int sy = y;
+							while (sy > 0 && MatD(x, sy, z) == 0) sy--;
+							idMat = MatD(x, sy, z);
+							if (idMat == 0) idMat = 2;
+						}
+						float xGlobal = baseX + x, zGlobal = baseZ + z;
+						float temp = noiseT?.GetNoise2D(xGlobal, zGlobal) ?? 0f;
+						float hum = noiseH?.GetNoise2D(xGlobal, zGlobal) ?? 0f;
+						Color couleurId = new Color(idMat / 255f, (temp + 1f) * 0.5f, (hum + 1f) * 0.5f, 1f);
+						for (int i = 0; triTable[cubeIndex, i] != -1; i += 3)
+						{
+							Vector3 v0 = vertList[triTable[cubeIndex, i]], v1 = vertList[triTable[cubeIndex, i + 1]], v2 = vertList[triTable[cubeIndex, i + 2]];
+							Vector3 n = (v1 - v0).Cross(v2 - v0).Normalized();
+							vertsT.Add(v0); vertsT.Add(v1); vertsT.Add(v2);
+							normsT.Add(n); normsT.Add(n); normsT.Add(n);
+							colsT.Add(couleurId); colsT.Add(couleurId); colsT.Add(couleurId);
+						}
+					}
+				}
+
+			if (bufferEau != null)
+			{
+				float[] valsEau = new float[8];
+				Vector3[] vertsEau = new Vector3[8];
+				for (int x = 0; x < tc; x++)
+					for (int y = 0; y < yFin - yDebut; y++)
+					{
+						int yG = yDebut + y;
+						for (int z = 0; z < tc; z++)
+						{
+							vertsEau[0] = new Vector3(x, yG, z);
+							vertsEau[1] = new Vector3(x + 1, yG, z);
+							vertsEau[2] = new Vector3(x + 1, yG + 1, z);
+							vertsEau[3] = new Vector3(x, yG + 1, z);
+							vertsEau[4] = new Vector3(x, yG, z + 1);
+							vertsEau[5] = new Vector3(x + 1, yG, z + 1);
+							vertsEau[6] = new Vector3(x + 1, yG + 1, z + 1);
+							vertsEau[7] = new Vector3(x, yG + 1, z + 1);
+							valsEau[0] = EauD(x, y, z); valsEau[1] = EauD(x + 1, y, z); valsEau[2] = EauD(x + 1, y + 1, z); valsEau[3] = EauD(x, y + 1, z);
+							valsEau[4] = EauD(x, y, z + 1); valsEau[5] = EauD(x + 1, y, z + 1); valsEau[6] = EauD(x + 1, y + 1, z + 1); valsEau[7] = EauD(x, y + 1, z + 1);
+							int ci = 0;
+							for (int i = 0; i < 8; i++)
+								if (valsEau[i] > IsolevelData) ci |= 1 << i;
+							if (edgeTable[ci] == 0) continue;
+							vertList[0] = Interp(vertsEau[0], vertsEau[1], valsEau[0], valsEau[1]);
+							vertList[1] = Interp(vertsEau[1], vertsEau[2], valsEau[1], valsEau[2]);
+							vertList[2] = Interp(vertsEau[2], vertsEau[3], valsEau[2], valsEau[3]);
+							vertList[3] = Interp(vertsEau[3], vertsEau[0], valsEau[3], valsEau[0]);
+							vertList[4] = Interp(vertsEau[4], vertsEau[5], valsEau[4], valsEau[5]);
+							vertList[5] = Interp(vertsEau[5], vertsEau[6], valsEau[5], valsEau[6]);
+							vertList[6] = Interp(vertsEau[6], vertsEau[7], valsEau[6], valsEau[7]);
+							vertList[7] = Interp(vertsEau[7], vertsEau[4], valsEau[7], valsEau[4]);
+							vertList[8] = Interp(vertsEau[0], vertsEau[4], valsEau[0], valsEau[4]);
+							vertList[9] = Interp(vertsEau[1], vertsEau[5], valsEau[1], valsEau[5]);
+							vertList[10] = Interp(vertsEau[2], vertsEau[6], valsEau[2], valsEau[6]);
+							vertList[11] = Interp(vertsEau[3], vertsEau[7], valsEau[3], valsEau[7]);
+							for (int i = 0; triTable[ci, i] != -1; i += 3)
+							{
+								Vector3 v0 = vertList[triTable[ci, i]], v1 = vertList[triTable[ci, i + 1]], v2 = vertList[triTable[ci, i + 2]];
+								Vector3 n = (v1 - v0).Cross(v2 - v0).Normalized();
+								vertsE.Add(v0); vertsE.Add(v1); vertsE.Add(v2);
+								normsE.Add(n); normsE.Add(n); normsE.Add(n);
+							}
+						}
+					}
+			}
+		}
+		finally
+		{
+			ArrayPool<float>.Shared.Return(bufferDensities);
+			ArrayPool<byte>.Shared.Return(bufferMaterials);
+			if (bufferEau != null) ArrayPool<float>.Shared.Return(bufferEau);
+		}
+
+		return new SectionPayload
+		{
+			SommetsVisuels = vertsT.ToArray(),
+			NormalsVisuels = normsT.ToArray(),
+			CouleursVisuels = colsT.ToArray(),
+			SommetsEau = vertsE?.Count > 0 ? vertsE.ToArray() : null,
+			NormalsEau = normsE?.Count > 0 ? normsE.ToArray() : null
+		};
 	}
 
 	private static Vector3 Interp(Vector3 p1, Vector3 p2, float v1, float v2)

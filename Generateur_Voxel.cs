@@ -501,8 +501,8 @@ public partial class Generateur_Voxel : Node3D
 		{
 			int idx = Mathf.FloorToInt(pos.Y / (float)HAUTEUR_SECTION);
 			if (idx >= 0 && idx < NB_SECTIONS) sections.Add(idx);
-			if (pos.Y % HAUTEUR_SECTION == 0 && pos.Y > 0 && idx - 1 >= 0)
-				sections.Add(idx - 1);
+			// Frontière section : pas de modulo (C# % peut être négatif). Même logique par comparaison.
+			if (pos.Y > 0 && idx > 0 && pos.Y == idx * HAUTEUR_SECTION) sections.Add(idx - 1);
 		}
 		return sections;
 	}
@@ -702,7 +702,10 @@ public partial class Generateur_Voxel : Node3D
 		float relief = Mathf.Pow(bruitNormalise, 3.0f);
 
 		// Plaine : plaines basses 103-105 (biais fort vers 103) + plaine principale 105-118
+		// TEST INVERSION AXES : si on utilise GetNoise2D(worldZ * ..., worldX * ...) et que le terrain s'aligne,
+		// la grille Marching Cubes ou l'index 1D lit X sur Z (à corriger côté Idx / ordre tableau).
 		float bruitPlaine = noiseSurface.GetNoise2D(worldX * 0.0003f, worldZ * 0.0003f);
+		// float bruitPlaine = noiseSurface.GetNoise2D(worldZ * 0.0004f, worldX * 0.0004f); // INVERSION VOLONTAIRE (test)
 		float bruitVague = noiseSurface.GetNoise2D(worldX * 0.0012f + 3000f, worldZ * 0.0012f + 3000f);
 		float bruitMicro = noiseSurface.GetNoise2D(worldX * 0.005f + 5000f, worldZ * 0.005f + 5000f);
 		float mix = (bruitPlaine + 1f) * 0.5f * 0.4f + (bruitVague + 1f) * 0.5f * 0.35f + (bruitMicro + 1f) * 0.5f * 0.25f;
@@ -749,7 +752,9 @@ public partial class Generateur_Voxel : Node3D
 		float relief = Mathf.Pow(bruitNormalise, 3.0f);  // Exposant 3 : plaine/collines/montagnes
 
 		// Plaine : plaines basses 103-105 (biais fort vers 103) + plaine principale 105-118
+		// TEST INVERSION : GetNoise2D(zGlobal, xGlobal) — si le terrain s'aligne, la grille / index 1D lisait X sur Z.
 		float bruitPlaine = _noiseErosion.GetNoise2D(xGlobal * 0.0003f, zGlobal * 0.0003f);
+		// float bruitPlaine = _noiseErosion.GetNoise2D(zGlobal * 0.0004f, xGlobal * 0.0004f); // INVERSION VOLONTAIRE (test)
 		float bruitVague = _noiseErosion.GetNoise2D(xGlobal * 0.0012f + 3000f, zGlobal * 0.0012f + 3000f);
 		float bruitMicro = _noiseErosion.GetNoise2D(xGlobal * 0.005f + 5000f, zGlobal * 0.005f + 5000f);
 		float mix = (bruitPlaine + 1f) * 0.5f * 0.4f + (bruitVague + 1f) * 0.5f * 0.35f + (bruitMicro + 1f) * 0.5f * 0.25f;
@@ -1180,6 +1185,7 @@ public partial class Generateur_Voxel : Node3D
 
 	public void DemarrerGenerationChunk(Vector2I coordChunk)
 	{
+		// Pas de division : baseX/baseZ = coord * TailleChunk (coordonnées monde du coin du chunk). Le point (0,0) reste à (0,0) ; toute conversion monde→chunk doit utiliser Mathf.FloorToInt(world / (float)TailleChunk).
 		float baseX = coordChunk.X * TailleChunk;
 		float baseZ = coordChunk.Y * TailleChunk;
 
@@ -1268,6 +1274,7 @@ public partial class Generateur_Voxel : Node3D
 				int yG = yDebut + y;
 				for (int z = 0; z < TailleChunk; z++)
 				{
+					// Paul Bourke : coins 0..7 = (x,y,z), (x+1,y,z), (x+1,y+1,z), (x,y+1,z), (x,y,z+1), ... — Vector3 = Godot (X,Y,Z), pas (z,y,x).
 					verts[0] = new Vector3(x, yG, z);
 					verts[1] = new Vector3(x + 1, yG, z);
 					verts[2] = new Vector3(x + 1, yG + 1, z);
@@ -1369,6 +1376,7 @@ public partial class Generateur_Voxel : Node3D
 					int yG = yDebut + y;
 					for (int z = 0; z < TailleChunk; z++)
 					{
+						// Alignement Godot : Vector3(x, yG, z) = (X, Y, Z), pas (z, y, x).
 						vertsEau[0] = new Vector3(x, yG, z);
 						vertsEau[1] = new Vector3(x + 1, yG, z);
 						vertsEau[2] = new Vector3(x + 1, yG + 1, z);

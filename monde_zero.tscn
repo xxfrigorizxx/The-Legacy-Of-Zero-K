@@ -62,7 +62,7 @@ adjustment_contrast = 1.25
 
 [node name="Gestionnaire_Monde" type="Node3D" parent="." unique_id=2015054098]
 script = ExtResource("3_monde")
-RenderDistance = 10
+RenderDistance = 14
 FuseauHoraireHeures = -10.0
 RayonPreGeneration = 1
 MaterielTerrain = ExtResource("14_manteau")
@@ -126,7 +126,7 @@ light_angular_distance = 2.54
 
 [node name="Lune" type="DirectionalLight3D" parent="." unique_id=545490241]
 transform = Transform3D(0.79597723, -0.5956493, -0.10780642, 0.02965417, -0.13951197, 0.98977625, -0.6045998, -0.7910363, -0.09338486, 0, 13.034426, 0)
-light_color = Color(0, 1, 1, 1)
+light_color = Color(0, 0.20311907, 0.20654139, 1)
 light_energy = 1.955
 shadow_enabled = true
 sky_mode = 1

@@ -17,6 +17,8 @@ public partial class Gestionnaire_Monde : Node3D
 	[Export] public bool PreGenererAuDemarrage = false;
 	[Export] public int RayonPreGeneration = 2;
 	[Export] public Material MaterielTerrain;
+	/// <summary>Matériau eau (océan). Créé automatiquement dans _Ready à partir de EauTriplanar.gdshader. Non exposé à l'éditeur.</summary>
+	public Material MaterielEau;
 	/// <summary>Échelle du gazon (grass.glb) sur ID 1. Modifier pour ajuster la taille partout.</summary>
 	[Export] public float EchelleGazon = 2f;
 	public int RayonMondeChunks = 1000;
@@ -44,18 +46,39 @@ public partial class Gestionnaire_Monde : Node3D
 	public void EnqueueMiseAJourMainThread(System.Action action) => _misesAJourMainThread.Enqueue(action);
 	public void EnqueueMiseAJourUrgente(System.Action action) => _misesAJourUrgentes.Enqueue(action);
 
+	/// <summary>Conversion monde → chunk avec arrondi géométrique (Floor). OBLIGATOIRE pour coordonnées négatives : (int)(x/TailleChunk) tronque vers zéro et casse la zone de spawn.</summary>
+	public static Vector2I WorldToChunkCoord(float worldX, float worldZ, int tailleChunk)
+	{
+		return new Vector2I(
+			Mathf.FloorToInt(worldX / (float)tailleChunk),
+			Mathf.FloorToInt(worldZ / (float)tailleChunk));
+	}
+
+	/// <summary>Conversion monde → chunk (Vector3). Utilise WorldToChunkCoord pour éviter la division entière C#.</summary>
+	public static Vector2I WorldToChunkCoord(Vector3 worldPos, int tailleChunk)
+		=> WorldToChunkCoord(worldPos.X, worldPos.Z, tailleChunk);
+
+	/// <summary>Règle d'or : coordonnée locale par soustraction euclidienne, JAMAIS par modulo (en C#, -5 % 16 = -5). Garantit local dans [0, TailleChunk] pour monde négatif.</summary>
+	public static void WorldToChunkAndLocal(float worldX, float worldZ, int tailleChunk, out Vector2I coordChunk, out int localX, out int localZ)
+	{
+		coordChunk = WorldToChunkCoord(worldX, worldZ, tailleChunk);
+		int worldCellX = Mathf.FloorToInt(worldX);
+		int worldCellZ = Mathf.FloorToInt(worldZ);
+		localX = worldCellX - coordChunk.X * tailleChunk;
+		localZ = worldCellZ - coordChunk.Y * tailleChunk;
+	}
+
 	/// <summary>Vrai si le chunk sous les pieds du joueur a sa collision construite (évite chute libre au spawn).</summary>
 	public bool EstSpawnPret()
 	{
 		if (_joueur == null) return false;
 		if (UseArchitectureReseau) return _mondeClient?.ChunkSousPiedsAPret() ?? false;
 		Vector3 pos = _joueur.GlobalPosition;
-		int cx = Mathf.FloorToInt(pos.X / (float)TailleChunk);
-		int cz = Mathf.FloorToInt(pos.Z / (float)TailleChunk);
-		if (!_chunks.TryGetValue(new Vector2I(cx, cz), out var n)) return false;
+		Vector2I c = WorldToChunkCoord(pos, TailleChunk);
+		if (!_chunks.TryGetValue(c, out var n)) return false;
 		var ch = n as Generateur_Voxel;
 		if (ch == null) return false;
-		int sec = Mathf.Clamp(Mathf.FloorToInt(pos.Y / 16f), 0, 15);
+		int sec = Mathf.FloorToInt(pos.Y / 16f);
 		return ch.SectionAPret(sec);
 	}
 
@@ -94,17 +117,12 @@ public partial class Gestionnaire_Monde : Node3D
 	private (Generateur_Voxel chunk, Vector3I local)? ObtenirChunkEtLocalLegacy(Vector3I pos)
 	{
 		if (pos.Y < 0 || pos.Y > HauteurMax) return null;
-		int cx = Mathf.FloorToInt(pos.X / (float)TailleChunk);
-		int cz = Mathf.FloorToInt(pos.Z / (float)TailleChunk);
-		Vector2I coord = new Vector2I(cx, cz);
-		if (!_chunks.TryGetValue(coord, out var n)) return null;
-		int lx = pos.X - cx * TailleChunk;
-		int lz = pos.Z - cz * TailleChunk;
+		Gestionnaire_Monde.WorldToChunkAndLocal(pos.X, pos.Z, TailleChunk, out Vector2I c, out int lx, out int lz);
+		if (!_chunks.TryGetValue(c, out var n)) return null;
 		if (lx < 0 || lx > TailleChunk || lz < 0 || lz > TailleChunk) return null;
 		var ch = n as Generateur_Voxel;
 		return ch != null ? (ch, new Vector3I(lx, pos.Y, lz)) : null;
 	}
-
 	private bool EstVoxelEauLegacy(Vector3I pos)
 	{
 		var r = ObtenirChunkEtLocalLegacy(pos);
@@ -130,14 +148,11 @@ public partial class Gestionnaire_Monde : Node3D
 		var r = ObtenirChunkEtLocalLegacy(pos);
 		if (!r.HasValue) return;
 		r.Value.chunk.ActualiserMesh();
-		int cx = Mathf.FloorToInt(pos.X / (float)TailleChunk);
-		int cz = Mathf.FloorToInt(pos.Z / (float)TailleChunk);
-		int lx = pos.X - cx * TailleChunk;
-		int lz = pos.Z - cz * TailleChunk;
-		if (lx == 0 && _chunks.TryGetValue(new Vector2I(cx - 1, cz), out var vx)) (vx as Generateur_Voxel)?.ActualiserMesh();
-		if (lx == TailleChunk - 1 && _chunks.TryGetValue(new Vector2I(cx + 1, cz), out var vxp)) (vxp as Generateur_Voxel)?.ActualiserMesh();
-		if (lz == 0 && _chunks.TryGetValue(new Vector2I(cx, cz - 1), out var vz)) (vz as Generateur_Voxel)?.ActualiserMesh();
-		if (lz == TailleChunk - 1 && _chunks.TryGetValue(new Vector2I(cx, cz + 1), out var vzp)) (vzp as Generateur_Voxel)?.ActualiserMesh();
+		Gestionnaire_Monde.WorldToChunkAndLocal(pos.X, pos.Z, TailleChunk, out Vector2I c, out int lx, out int lz);
+		if (lx == 0 && _chunks.TryGetValue(new Vector2I(c.X - 1, c.Y), out var vx)) (vx as Generateur_Voxel)?.ActualiserMesh();
+		if (lx == TailleChunk - 1 && _chunks.TryGetValue(new Vector2I(c.X + 1, c.Y), out var vxp)) (vxp as Generateur_Voxel)?.ActualiserMesh();
+		if (lz == 0 && _chunks.TryGetValue(new Vector2I(c.X, c.Y - 1), out var vz)) (vz as Generateur_Voxel)?.ActualiserMesh();
+		if (lz == TailleChunk - 1 && _chunks.TryGetValue(new Vector2I(c.X, c.Y + 1), out var vzp)) (vzp as Generateur_Voxel)?.ActualiserMesh();
 	}
 
 	public override void _Ready()
@@ -196,6 +211,16 @@ public partial class Gestionnaire_Monde : Node3D
 			_ = PreGenererMonde(RayonPreGeneration);
 
 		CreerMenuPause();
+
+		// Forge automatique du matériau eau (bypass de l'éditeur) — sanctuarisation : le GC ne le détruira pas car lié au nœud.
+		var shaderEau = GD.Load<Shader>("res://EauTriplanar.gdshader");
+		if (shaderEau != null)
+		{
+			var matEau = new ShaderMaterial();
+			matEau.Shader = shaderEau;
+			matEau.SetShaderParameter("albedo_color", new Color(0.1f, 0.3f, 0.6f, 0.6f));
+			MaterielEau = matEau;
+		}
 	}
 
 	public override void _Input(InputEvent @event)
@@ -344,7 +369,7 @@ public partial class Gestionnaire_Monde : Node3D
 
 		// Lier le chunk de spawn en priorité pour éviter chute libre (comme les 2 fois précédentes)
 		Vector3 pos = _joueur.GlobalPosition;
-		Vector2I chunkSpawn = new Vector2I(Mathf.FloorToInt(pos.X / (float)TailleChunk), Mathf.FloorToInt(pos.Z / (float)TailleChunk));
+		Vector2I chunkSpawn = WorldToChunkCoord(pos, TailleChunk);
 		_mondeClient.ReserverChunkSpawnPrioritaire(chunkSpawn);
 
 		// Envoyer le fuseau horaire de la dimension au client (spawn / portail)
@@ -483,8 +508,7 @@ public partial class Gestionnaire_Monde : Node3D
 	private Vector2I ObtenirCoordonneesChunkJoueur()
 	{
 		if (_joueur == null) return Vector2I.Zero;
-		Vector3 p = _joueur.GlobalPosition;
-		return new Vector2I(Mathf.FloorToInt(p.X / (float)TailleChunk), Mathf.FloorToInt(p.Z / (float)TailleChunk));
+		return WorldToChunkCoord(_joueur.GlobalPosition, TailleChunk);
 	}
 
 	public void AppliquerDestructionGlobale(Vector3 pointImpact, float rayon)

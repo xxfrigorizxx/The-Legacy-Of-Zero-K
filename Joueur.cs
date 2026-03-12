@@ -427,7 +427,6 @@ public partial class Joueur : CharacterBody3D
             sb.AddChild(new MeshInstance3D { Mesh = new BoxMesh { Size = Vector3.One }, MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.1f, 0.8f, 0.2f) } });
             corps = sb;
         }
-        corps.GlobalPosition = pointDeChute;
         corps.SetMeta("ID_Matiere", id);
         corps.AddToGroup("BlocsPoses");
         if (id == 10 || id == 11 || id == 12)
@@ -436,6 +435,7 @@ public partial class Joueur : CharacterBody3D
             corps.AddChild(item);
         }
         GetParent().AddChild(corps);
+        corps.GlobalPosition = pointDeChute;
     }
 
     private float _tempsAttenteSpawn;

@@ -572,7 +572,9 @@ public partial class Chunk_Serveur : RefCounted
 		foreach (var pos in positionsDetruites)
 		{
 			_reveillerEau?.Invoke(PositionMonde + new Vector3(pos.X, pos.Y, pos.Z));
-			var posGlobal = new Vector3I((int)PositionMonde.X + pos.X, pos.Y, (int)PositionMonde.Z + pos.Z);
+			int gx = Mathf.FloorToInt(PositionMonde.X) + pos.X;
+			int gz = Mathf.FloorToInt(PositionMonde.Z) + pos.Z;
+			var posGlobal = new Vector3I(gx, pos.Y, gz);
 			_onVoxelModifie?.Invoke(posGlobal, 0);
 		}
 		AuditerGraviteFlore();
@@ -606,7 +608,9 @@ public partial class Chunk_Serveur : RefCounted
 		foreach (var pos in positionsModifiees)
 		{
 			_reveillerEau?.Invoke(PositionMonde + new Vector3(pos.X, pos.Y, pos.Z));
-			var posGlobal = new Vector3I((int)PositionMonde.X + pos.X, pos.Y, (int)PositionMonde.Z + pos.Z);
+			int gx = Mathf.FloorToInt(PositionMonde.X) + pos.X;
+			int gz = Mathf.FloorToInt(PositionMonde.Z) + pos.Z;
+			var posGlobal = new Vector3I(gx, pos.Y, gz);
 			_onVoxelModifie?.Invoke(posGlobal, idMatiere);
 		}
 		AuditerGraviteFlore();
@@ -620,7 +624,8 @@ public partial class Chunk_Serveur : RefCounted
 		{
 			int idx = Mathf.FloorToInt(pos.Y / (float)HAUTEUR_SECTION);
 			if (idx >= 0 && idx < NB_SECTIONS) sections.Add(idx);
-			if (pos.Y % HAUTEUR_SECTION == 0 && pos.Y > 0 && idx - 1 >= 0) sections.Add(idx - 1);
+			// Frontière section : pas de modulo (en C# pos.Y % 16 peut être négatif). Même logique par soustraction.
+			if (pos.Y > 0 && idx > 0 && pos.Y == idx * HAUTEUR_SECTION) sections.Add(idx - 1);
 		}
 		return new List<int>(sections);
 	}

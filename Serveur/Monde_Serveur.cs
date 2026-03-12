@@ -44,7 +44,7 @@ public partial class Monde_Serveur : Node
 	private HashSet<Vector2I> _chunksEnCoursGeneration = new HashSet<Vector2I>();
 	private int _chunksEnGenerationActive;
 	private static readonly int MaxThreadsGeneration = 4;
-	[Export] public int MultiplicateurCharge = 16;
+	[Export] public int MultiplicateurCharge = 8; // 16 → 8 pour test (génération /2)
 	private int LancerMaxTaches => MaxThreadsGeneration * MultiplicateurCharge;
 	private const int MaxChunksEnvoiParTick = 16;
 	private bool _modificationEnCours;
@@ -59,7 +59,10 @@ public partial class Monde_Serveur : Node
 
 	/// <summary>Pierres chargées depuis disque → instanciation goutte-à-goutte (quand chunk dessiné à l'écran).</summary>
 	private Queue<(Vector3 pos, int id, int indexCache, int indexChimique)> _filePierresAInstancier = new Queue<(Vector3, int, int, int)>();
-	private const int MaxPierresParFrame = 12;
+	/// <summary>Chambre de stase : roches par coord de chunk. Aucune poussière avant que la croûte (chunk) soit scellée — libérées seulement à l'envoi du chunk.</summary>
+	private Dictionary<Vector2I, List<(Vector3 pos, int id, int indexCache, int indexChimique)>> _rochesEnStase = new Dictionary<Vector2I, List<(Vector3, int, int, int)>>();
+	/// <summary>Micro-dosage : au plus 3 cailloux par frame pour éviter pics CPU / sync BVH Jolt (AddChild lourd).</summary>
+	private const int MaxPierresParFrame = 3;
 
 	/// <summary>Pools de roches par taille (ID 10–14). Limite 50 par catégorie. Plus loin du joueur → formes plus cassées (2e moitié du cache).</summary>
 	private Dictionary<int, List<RigidBody3D>> _poolsRochesParTaille = new Dictionary<int, List<RigidBody3D>>();
@@ -220,6 +223,8 @@ public partial class Monde_Serveur : Node
 		{
 			ColisChunk colis = _fileEnvoiReseau.Dequeue();
 			_onEnvoyerChunk?.Invoke(colis.Coord, colis.Donnees);
+			// Verrou chronologique : la croûte est scellée (chunk envoyé) → on libère les roches de ce chunk vers la file de micro-dosage.
+			LibererRochesChunk(colis.Coord);
 			envoisCeTick++;
 		}
 
@@ -435,7 +440,7 @@ public partial class Monde_Serveur : Node
 		var aEnfiler = new List<(Vector3 pos, int id, int indexCache, int indexChimique)>();
 		foreach (var (pos, id) in positionsFiltrees)
 			aEnfiler.Add((pos, id, -1, -1));
-		EnfilerPierresSurTapisRoulant(aEnfiler);
+		MettreRochesEnStase(chunkCoord, aEnfiler);
 	}
 
 	private const int ID_SILEX = 11;
@@ -510,6 +515,30 @@ public partial class Monde_Serveur : Node
 		return liste;
 	}
 
+	/// <summary>Chambre de stase : les roches attendent leur sol. Pas de spawn tant que le chunk n'est pas scellé (envoyé).</summary>
+	private void MettreRochesEnStase(Vector2I coordChunk, List<(Vector3 pos, int id, int indexCache, int indexChimique)> pierres)
+	{
+		if (pierres.Count == 0) return;
+		pierres.Sort((a, b) =>
+		{
+			int cmpX = a.pos.X.CompareTo(b.pos.X);
+			if (cmpX != 0) return cmpX;
+			int cmpZ = a.pos.Z.CompareTo(b.pos.Z);
+			if (cmpZ != 0) return cmpZ;
+			return a.pos.Y.CompareTo(b.pos.Y);
+		});
+		_rochesEnStase[coordChunk] = pierres;
+	}
+
+	/// <summary>Signal de fondation : chunk scellé (envoyé au client) → on transfère ses roches vers la file de micro-dosage (3 par frame).</summary>
+	private void LibererRochesChunk(Vector2I coordChunk)
+	{
+		if (!_rochesEnStase.TryGetValue(coordChunk, out var liste)) return;
+		foreach (var p in liste)
+			_filePierresAInstancier.Enqueue(p);
+		_rochesEnStase.Remove(coordChunk);
+	}
+
 	/// <summary>Enfile cailloux et silex sur le tapis roulant en ordre spatial logique (X, Z, Y) : terrain cohérent.</summary>
 	private void EnfilerPierresSurTapisRoulant(List<(Vector3 pos, int id, int indexCache, int indexChimique)> pierres)
 	{
@@ -547,8 +576,16 @@ public partial class Monde_Serveur : Node
 		}
 		else
 			rb = CreerNouvelleRoche(idObjet, indexCache, indexChimique);
-		_parentPourBlocsChutants.AddChild(rb);
-		rb.GlobalPosition = position;
+		try
+		{
+			_parentPourBlocsChutants.AddChild(rb);
+			rb.GlobalPosition = position;
+		}
+		catch (Exception ex)
+		{
+			GD.PrintErr($"ZERO-K CRASH ÉVITÉ : Objet physique échoué à l'instanciation. {ex.Message}");
+			rb?.QueueFree();
+		}
 	}
 
 	/// <summary>Crée une roche neuve (mesh/collision selon id). N'est pas ajoutée au parent.</summary>
@@ -668,7 +705,7 @@ public partial class Monde_Serveur : Node
 						pierres.Add((new Vector3(x, y, z), id, indexCache, indexChimique));
 				}
 			}
-			EnfilerPierresSurTapisRoulant(pierres);
+			MettreRochesEnStase(coord, pierres);
 			return true;
 		}
 		catch (Exception ex) { GD.PrintErr($"ZERO-K : Erreur chargement pierres chunk {coord} : {ex.Message}"); return false; }
@@ -710,10 +747,10 @@ public partial class Monde_Serveur : Node
 	public void AppliquerDestructionGlobale(Vector3 pointImpact, float rayon, int peerDemandeur = -1)
 	{
 		_modificationEnCours = true;
-		int cxMin = Mathf.FloorToInt((pointImpact.X - rayon) / (float)TailleChunk);
-		int cxMax = Mathf.FloorToInt((pointImpact.X + rayon) / (float)TailleChunk);
-		int czMin = Mathf.FloorToInt((pointImpact.Z - rayon) / (float)TailleChunk);
-		int czMax = Mathf.FloorToInt((pointImpact.Z + rayon) / (float)TailleChunk);
+		int cxMin = Gestionnaire_Monde.WorldToChunkCoord(pointImpact.X - rayon, pointImpact.Z, TailleChunk).X;
+		int cxMax = Gestionnaire_Monde.WorldToChunkCoord(pointImpact.X + rayon, pointImpact.Z, TailleChunk).X;
+		int czMin = Gestionnaire_Monde.WorldToChunkCoord(pointImpact.X, pointImpact.Z - rayon, TailleChunk).Y;
+		int czMax = Gestionnaire_Monde.WorldToChunkCoord(pointImpact.X, pointImpact.Z + rayon, TailleChunk).Y;
 
 		for (int cx = cxMin; cx <= cxMax; cx++)
 			for (int cz = czMin; cz <= czMax; cz++)
@@ -728,8 +765,9 @@ public partial class Monde_Serveur : Node
 	{
 		_modificationEnCours = true;
 		Vector3 pointCible = pointImpact + (normale * 0.1f); // Réduit pour éviter les blocs flottants
-		int cx = Mathf.FloorToInt(pointCible.X / (float)TailleChunk);
-		int cz = Mathf.FloorToInt(pointCible.Z / (float)TailleChunk);
+		Vector2I c = Gestionnaire_Monde.WorldToChunkCoord(pointCible.X, pointCible.Z, TailleChunk);
+		int cx = c.X;
+		int cz = c.Y;
 		Vector2I coord = new Vector2I(cx, cz);
 
 		var chunk = ObtenirOuCreerChunk(coord);
@@ -745,15 +783,10 @@ public partial class Monde_Serveur : Node
 	private (Chunk_Serveur chunk, Vector3I local)? ObtenirChunkEtLocal(Vector3I pos)
 	{
 		if (pos.Y < 0 || pos.Y > HauteurMax) return null;
-		int cx = Mathf.FloorToInt(pos.X / (float)TailleChunk);
-		int cz = Mathf.FloorToInt(pos.Z / (float)TailleChunk);
-		Vector2I coord = new Vector2I(cx, cz);
+		Gestionnaire_Monde.WorldToChunkAndLocal(pos.X, pos.Z, TailleChunk, out Vector2I c, out int lx, out int lz);
+		Vector2I coord = new Vector2I(c.X, c.Y);
 		if (!_chunks.TryGetValue(coord, out var ch)) return null;
-
-		int lx = pos.X - cx * TailleChunk;
-		int lz = pos.Z - cz * TailleChunk;
 		if (lx < 0 || lx > TailleChunk || lz < 0 || lz > TailleChunk) return null;
-
 		return (ch, new Vector3I(lx, pos.Y, lz));
 	}
 
@@ -781,10 +814,9 @@ public partial class Monde_Serveur : Node
 	/// <summary>Réplique la modification sur le padding des chunks voisins (évite déchirures quand chunk envoyé plus tard).</summary>
 	public void RepliquerPaddingVoisins(Vector3I posGlobal, byte id)
 	{
-		int cx = Mathf.FloorToInt(posGlobal.X / (float)TailleChunk);
-		int cz = Mathf.FloorToInt(posGlobal.Z / (float)TailleChunk);
-		int localX = posGlobal.X - cx * TailleChunk;
-		int localZ = posGlobal.Z - cz * TailleChunk;
+		Gestionnaire_Monde.WorldToChunkAndLocal(posGlobal.X, posGlobal.Z, TailleChunk, out Vector2I c, out int localX, out int localZ);
+		int cx = c.X;
+		int cz = c.Y;
 
 		if (localX == 0 && _chunks.TryGetValue(new Vector2I(cx - 1, cz), out var vx))
 			vx.SetVoxelLocal(TailleChunk, posGlobal.Y, localZ, id);
@@ -798,11 +830,10 @@ public partial class Monde_Serveur : Node
 	{
 		var r = ObtenirChunkEtLocal(pos);
 		if (!r.HasValue) return;
-		int cx = Mathf.FloorToInt(pos.X / (float)TailleChunk);
-		int cz = Mathf.FloorToInt(pos.Z / (float)TailleChunk);
+		Gestionnaire_Monde.WorldToChunkAndLocal(pos.X, pos.Z, TailleChunk, out Vector2I c, out int lx, out int lz);
+		int cx = c.X;
+		int cz = c.Y;
 		int sec = Mathf.Clamp(Mathf.FloorToInt(pos.Y / 16f), 0, 44);  // 45 sections (0-44) pour HauteurMax 720
-		int lx = pos.X - cx * TailleChunk;
-		int lz = pos.Z - cz * TailleChunk;
 		_onChunkModifie?.Invoke(new Vector2I(cx, cz), new List<int> { sec });
 		if (lx == 0) _onChunkModifie?.Invoke(new Vector2I(cx - 1, cz), new List<int> { sec });
 		if (lx == TailleChunk - 1) _onChunkModifie?.Invoke(new Vector2I(cx + 1, cz), new List<int> { sec });
@@ -829,9 +860,8 @@ public partial class Monde_Serveur : Node
 
 	private float DistanceCarreeAuJoueur(Vector2I chunk, Vector3 posObservation)
 	{
-		int obsCx = Mathf.FloorToInt(posObservation.X / (float)TailleChunk);
-		int obsCz = Mathf.FloorToInt(posObservation.Z / (float)TailleChunk);
-		int dx = chunk.X - obsCx, dz = chunk.Y - obsCz;
+		Vector2I obs = Gestionnaire_Monde.WorldToChunkCoord(posObservation, TailleChunk);
+		int dx = chunk.X - obs.X, dz = chunk.Y - obs.Y;
 		return dx * dx + dz * dz;
 	}
 
@@ -862,8 +892,9 @@ public partial class Monde_Serveur : Node
 	{
 		if (_obtenirPositionJoueur == null || _onOrdonnerDestructionChunk == null) return;
 		Vector3 posJoueur = _obtenirPositionJoueur();
-		int cjX = Mathf.FloorToInt(posJoueur.X / (float)TailleChunk);
-		int cjZ = Mathf.FloorToInt(posJoueur.Z / (float)TailleChunk);
+		Vector2I cj = Gestionnaire_Monde.WorldToChunkCoord(posJoueur, TailleChunk);
+		int cjX = cj.X;
+		int cjZ = cj.Y;
 
 		var aDecharger = new List<Vector2I>();
 		foreach (var kv in _chunks)
