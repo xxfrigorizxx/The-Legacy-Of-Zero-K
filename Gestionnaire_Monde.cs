@@ -249,8 +249,8 @@ public partial class Gestionnaire_Monde : Node3D
 
 	public override void _ExitTree()
 	{
-		// Sauvegarde position joueur (reconnexion au même endroit)
-		if (_joueur != null)
+		// Sauvegarde position joueur (reconnexion au même endroit) — uniquement si encore dans l'arbre.
+		if (_joueur != null && _joueur.IsInsideTree())
 			GameState.Instance?.SauvegarderPositionJoueur(_joueur.GlobalPosition);
 		// RÈGLE ABSOLUE : sauvegarde des chunks modifiés AVANT destruction (parent _ExitTree avant enfants).
 		if (UseArchitectureReseau)

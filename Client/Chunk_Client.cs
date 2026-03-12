@@ -74,7 +74,6 @@ public partial class Chunk_Client : Node3D
 	private Dictionary<Vector3I, byte> _inventaireFloreEnAttente;
 	private Dictionary<Vector3I, byte> _inventaireFloreCache;
 	private ChunkFlorePayload _payloadFloreCache;
-	private ChunkCaillouxPayload _payloadCaillouxCache;
 	private int _frameFlore;
 	/// <summary>Rayon en chunks : seul le gazon (grass.glb) est visible dans cette zone autour du joueur. Les buissons restent visibles partout.</summary>
 	private const int RAYON_GAZON_CHUNKS = 1;
@@ -1286,6 +1285,18 @@ public partial class Chunk_Client : Node3D
 		data.TailleChunk = donnees.TailleChunk;
 		data.HauteurMax = donnees.HauteurMax;
 
+		var payloads = new List<SectionPayload>(NB_SECTIONS);
+		for (int i = 0; i < NB_SECTIONS; i++)
+			payloads.Add(ConstruireSectionPayloadEnBackgroundFromData(data, i, baseX, baseZ));
+		return payloads;
+	}
+
+	/// <summary>Reconstruit les 45 SectionPayload à partir d'un ChunkData déjà rempli (minage/pose). Pour mise à jour visuelle après AppliquerVoxel.</summary>
+	public static List<SectionPayload> ReconstruirePayloadsDepuisData(ChunkData data)
+	{
+		if (data?.DensitiesFlat == null || data.MaterialsFlat == null) return null;
+		float baseX = data.Coordonnees.X * (float)data.TailleChunk;
+		float baseZ = data.Coordonnees.Y * (float)data.TailleChunk;
 		var payloads = new List<SectionPayload>(NB_SECTIONS);
 		for (int i = 0; i < NB_SECTIONS; i++)
 			payloads.Add(ConstruireSectionPayloadEnBackgroundFromData(data, i, baseX, baseZ));

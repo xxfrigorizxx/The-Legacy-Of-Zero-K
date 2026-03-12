@@ -121,7 +121,13 @@ public partial class Monde_Client : Node3D
 		RenderingServer.Singleton.InstanceSetTransform(instanceRid, transformChunk);
 
 		// 3. PhysicsServer3D : corps statique + forme (trimesh depuis le mesh fusionné)
-		Shape3D shape = mergedMesh.GetFaces().Length > 0 ? mergedMesh.CreateTrimeshShape() : null;
+		Vector3[] faces = mergedMesh.GetFaces();
+		Shape3D shape = null;
+		if (faces != null && faces.Length > 0)
+		{
+			try { shape = mergedMesh.CreateTrimeshShape(); }
+			catch (Exception) { shape = null; }
+		}
 		if (shape == null) { RenderingServer.Singleton.FreeRid(instanceRid); return; }
 		Rid shapeRid = shape.GetRid();
 		Rid bodyRid = PhysicsServer3D.Singleton.BodyCreate();
@@ -143,6 +149,29 @@ public partial class Monde_Client : Node3D
 		{
 			_fileAttenteSolidification.Add(data);
 			data.EstEnFileSolidification = true;
+		}
+		// Chunk sous les pieds du joueur : solidifier tout de suite pour ne jamais traverser la map.
+		if (_joueur != null)
+		{
+			Vector2I cJoueur = Gestionnaire_Monde.WorldToChunkCoord(_joueur.GlobalPosition, TailleChunk);
+			if (data.Coordonnees == cJoueur && data.PhysicsBodyRID.IsValid)
+			{
+				_fileAttenteSolidification.Remove(data);
+				data.EstEnFileSolidification = false;
+				PhysicsServer3D.Singleton.BodySetSpace(data.PhysicsBodyRID, world.Space);
+			}
+			else
+			{
+				// Solidifier les chunks à distance 2 (couronne autour du joueur) pour ne pas passer à travers au loin
+				int dx = Mathf.Abs(data.Coordonnees.X - cJoueur.X);
+				int dz = Mathf.Abs(data.Coordonnees.Y - cJoueur.Y);
+				if (dx <= 2 && dz <= 2 && data.PhysicsBodyRID.IsValid)
+				{
+					_fileAttenteSolidification.Remove(data);
+					data.EstEnFileSolidification = false;
+					PhysicsServer3D.Singleton.BodySetSpace(data.PhysicsBodyRID, world.Space);
+				}
+			}
 		}
 
 		// 4. Eau : fusion des SommetsEau/NormalsEau de toutes les sections, même transform que le terrain
@@ -196,27 +225,31 @@ public partial class Monde_Client : Node3D
 	{
 		if (!IsInsideTree()) return; // GARROT SPATIAL : pas de manipulation de chunks si l'arbre s'effondre.
 
-		// GOULOT DE SOLIDIFICATION PHYSIQUE : 1 chunk par frame pour lisser la charge PhysicsServer3D (dilution physique).
+		// GOULOT DE SOLIDIFICATION PHYSIQUE : priorité au chunk sous les pieds du joueur pour éviter de traverser la map.
 		if (_fileAttenteSolidification.Count > 0)
 		{
 			Vector2I coordObsSolidif = ObtenirCoordonneesChunkJoueur();
-			// Priorisation par distance : solidifier d'abord le chunk sous les pieds du joueur.
 			_fileAttenteSolidification.Sort((a, b) =>
 			{
 				int da = (a.Coordonnees.X - coordObsSolidif.X) * (a.Coordonnees.X - coordObsSolidif.X) + (a.Coordonnees.Y - coordObsSolidif.Y) * (a.Coordonnees.Y - coordObsSolidif.Y);
 				int db = (b.Coordonnees.X - coordObsSolidif.X) * (b.Coordonnees.X - coordObsSolidif.X) + (b.Coordonnees.Y - coordObsSolidif.Y) * (b.Coordonnees.Y - coordObsSolidif.Y);
 				return da.CompareTo(db);
 			});
-			ChunkData chunkASolidifier = _fileAttenteSolidification[0];
-			_fileAttenteSolidification.RemoveAt(0);
-			chunkASolidifier.EstEnFileSolidification = false;
-			int dx = Mathf.Abs(chunkASolidifier.Coordonnees.X - coordObsSolidif.X);
-			int dz = Mathf.Abs(chunkASolidifier.Coordonnees.Y - coordObsSolidif.Y);
-			if (dx <= RayonDormancePhysique && dz <= RayonDormancePhysique && chunkASolidifier.PhysicsBodyRID.IsValid)
+			// Solidifier plusieurs chunks autour du joueur pour éviter de passer à travers (surtout en s'éloignant du spawn).
+			const int MaxSolidificationsProche = 6;
+			int solidifies = 0;
+			World3D w = GetWorld3D();
+			while (_fileAttenteSolidification.Count > 0 && solidifies < MaxSolidificationsProche)
 			{
-				World3D w = GetWorld3D();
-				if (w != null)
+				ChunkData chunkASolidifier = _fileAttenteSolidification[0];
+				_fileAttenteSolidification.RemoveAt(0);
+				chunkASolidifier.EstEnFileSolidification = false;
+				int dx = Mathf.Abs(chunkASolidifier.Coordonnees.X - coordObsSolidif.X);
+				int dz = Mathf.Abs(chunkASolidifier.Coordonnees.Y - coordObsSolidif.Y);
+				if (dx <= RayonDormancePhysique && dz <= RayonDormancePhysique && chunkASolidifier.PhysicsBodyRID.IsValid && w != null)
 					PhysicsServer3D.Singleton.BodySetSpace(chunkASolidifier.PhysicsBodyRID, w.Space);
+				solidifies++;
+				// Ne pas limiter à "distance 1" : vider la file jusqu'à 6 chunks pour que le sol soit prêt dès qu'on s'éloigne du spawn
 			}
 		}
 
@@ -271,12 +304,15 @@ public partial class Monde_Client : Node3D
 		bool hadModifications = _sectionsAReconstruire.Count > 0;
 		_modificationEnCours = false;
 
-		// 1. PRIORITÉ ABSOLUE : Reconstruire immédiatement les sections minées (synchrone, pas de ThreadPool)
+		// 1. PRIORITÉ ABSOLUE : Reconstruire les chunks modifiés (minage/pose) pour que le terrain se mette à jour
 		if (hadModifications)
 		{
+			var chunksUniques = new HashSet<Vector2I>();
 			foreach (var cible in _sectionsAReconstruire)
-				ExecuterReconstructionPrioritaire(cible);
+				chunksUniques.Add(new Vector2I(cible.cx, cible.cz));
 			_sectionsAReconstruire.Clear();
+			foreach (Vector2I coord in chunksUniques)
+				ExecuterReconstructionPrioritaire(coord);
 			// Gel de Production : l'univers s'arrête de naître pendant cette frame.
 			return;
 		}
@@ -306,6 +342,22 @@ public partial class Monde_Client : Node3D
 			ActualiserDormanceChunks(chunkObservationActuel.X, chunkObservationActuel.Y);
 		}
 
+		// Priorité : si le chunk sous le joueur n'est pas encore chargé, le mettre en tête pour qu'il s'affiche (évite "noir" au-delà du spawn)
+		Vector2I chunkPieds = Gestionnaire_Monde.WorldToChunkCoord(positionObservation, TailleChunk);
+		if (!_chunksData.ContainsKey(chunkPieds))
+		{
+			var prioritaire = new List<Vector2I> { chunkPieds };
+			for (int dx = -1; dx <= 1; dx++)
+				for (int dz = -1; dz <= 1; dz++)
+					if ((dx != 0 || dz != 0))
+					{
+						var v = new Vector2I(chunkPieds.X + dx, chunkPieds.Y + dz);
+						if (!_chunksData.ContainsKey(v)) prioritaire.Add(v);
+					}
+			_chunksACharger.RemoveAll(c => prioritaire.Contains(c));
+			_chunksACharger.InsertRange(0, prioritaire);
+		}
+
 		if (_modificationEnCours) return;
 
 		// 3. Requêtes : extraction radiale + purge obsolètes
@@ -328,12 +380,15 @@ public partial class Monde_Client : Node3D
 		}
 	}
 
-	private void ExecuterReconstructionPrioritaire((int cx, int cz, int section) cible)
+	private void ExecuterReconstructionPrioritaire(Vector2I coord)
 	{
-		// Architecture AAA : pas de reconstruction par section (un seul body par chunk). On pourrait re-demander le chunk au serveur.
-		var coord = new Vector2I(cible.cx, cible.cz);
-		if (!_chunksData.TryGetValue(coord, out _)) return;
-		// Option : _enregistrerDemandeChunk?.Invoke(coord); pour recharger
+		if (!_chunksData.TryGetValue(coord, out var data)) return;
+		if (data.DensitiesFlat == null || data.MaterialsFlat == null) return;
+		// Libérer l'ancien mesh et la collision avant de recréer (sinon fuite RID)
+		data.LibérerRids();
+		var payloads = Chunk_Client.ReconstruirePayloadsDepuisData(data);
+		if (payloads != null && payloads.Count > 0)
+			IntegrerChunkDataRIDs(data, payloads);
 	}
 
 	private float DistanceCarreeAuJoueur(Vector2I chunk, Vector3 posObservation)

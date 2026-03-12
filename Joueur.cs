@@ -7,6 +7,10 @@ public struct SlotInventaire
     public int ID;
     public int IndexMorphologique;
     public int IndexChimique;
+    /// <summary>True si le slot contient un éclat de fracture (mesh dynamique, pas dans le cache).</summary>
+    public bool EstUnEclat;
+    /// <summary>Mesh sauvegardé pour les éclats (sinon null).</summary>
+    public Mesh MeshEclat;
     public bool EstVide => ID == 0;
 }
 
@@ -38,12 +42,20 @@ public partial class Joueur : CharacterBody3D
     private MeshInstance3D _meshPreviewGauche;
     private MeshInstance3D _meshPreviewDroite;
 
+    private float _forceLancer;
+    private const float VitesseChargeBras = 1.8f;
+
+    /// <summary>Clic gauche : charge pour pose (court) ou lancer (long).</summary>
+    private bool _gaucheMaintenu = false;
+    private float _tempsChargeGauche = 0f;
+
     public override void _Ready()
     {
         Input.MouseMode = Input.MouseModeEnum.Captured;
 
         _camera = GetNode<Camera3D>("Camera3D");
         _rayon = GetNode<RayCast3D>("Camera3D/RayCast3D");
+        _rayon.AddException(this); // Ne pas toucher le joueur (sinon le "minage" ne vise pas le sol)
         _gestionnaireMonde = GetParent().GetNode<Gestionnaire_Monde>("Gestionnaire_Monde");
         _slotGauche = GetParent().GetNode<Panel>("Gestionnaire_Monde/HUD_Inventaire/Conteneur_Ancrage/Boite_Slots/Slot_Main_Gauche");
         _slotDroite = GetParent().GetNode<Panel>("Gestionnaire_Monde/HUD_Inventaire/Conteneur_Ancrage/Boite_Slots/Slot_Main_Droite");
@@ -107,17 +119,45 @@ public partial class Joueur : CharacterBody3D
     {
         if (@event.IsActionPressed("clic_gauche"))
         {
-            // STRICTEMENT RÉSERVÉ AU MINAGE DU TERRAIN (Phase 1)
-            ExecuterMinageVoxel();
+            SlotInventaire mainActive = MainGaucheEstActive ? MainGauche : MainDroite;
+            if (mainActive.EstVide) ExecuterMinageVoxel(); // MAIN VIDE = CREUSE DIRECTEMENT
+            else { _gaucheMaintenu = true; _tempsChargeGauche = 0f; } // MAIN PLEINE = CHARGE LA FRAPPE
+        }
+        else if (@event.IsActionReleased("clic_gauche") && _gaucheMaintenu)
+        {
+            _gaucheMaintenu = false;
+            SlotInventaire mainActive = MainGaucheEstActive ? MainGauche : MainDroite;
+            if (!mainActive.EstVide && EstObjetProcedural(mainActive.ID))
+                ExecuterFrappe(Mathf.Clamp(_tempsChargeGauche, 0.1f, 2f)); // RELÂCHE = FRAPPE LA PIERRE
         }
         else if (@event.IsActionPressed("clic_droit"))
         {
-            // STRICTEMENT RÉSERVÉ AU PLACEMENT (Construction ou Rejet d'objet)
-            ExecuterPlacement();
+            SlotInventaire mainActive = MainGaucheEstActive ? MainGauche : MainDroite;
+            if (!mainActive.EstVide) _forceLancer = 0f; // MAIN PLEINE = DÉBUT CHARGE LANCER/POSER
+        }
+        else if (@event.IsActionReleased("clic_droit"))
+        {
+            SlotInventaire mainActive = MainGaucheEstActive ? MainGauche : MainDroite;
+            if (!mainActive.EstVide)
+            {
+                // IDENTIFICATION DE LA MATIÈRE : Est-ce du terrain (Voxel) ?
+                bool estTerrainVoxel = mainActive.ID >= 1 && mainActive.ID <= 9;
+                // Si c'est du terrain OU que le clic a été très bref, on pose sur le sol (fusion ou dépose)
+                if (estTerrainVoxel || _forceLancer < 0.2f)
+                {
+                    ExecuterPlacement();
+                }
+                else
+                {
+                    // C'est un objet physique (pierre, arme) ET le clic a été long -> On lance
+                    ExecuterLancer(Mathf.Clamp(_forceLancer, 0.5f, 2.0f));
+                }
+                _forceLancer = 0f;
+            }
         }
         else if (@event.IsActionPressed("interagir"))
         {
-            // STRICTEMENT RÉSERVÉ AU RAMASSAGE DES OBJETS PHYSIQUES (Phase 2)
+            // E = ramasser roches / objets au sol
             ExecuterRamassageObjet();
         }
         else if (@event.IsActionPressed("changer_main"))
@@ -211,10 +251,11 @@ public partial class Joueur : CharacterBody3D
             _objetEnMain.Mesh = null;
             return;
         }
-        Mesh m = ObtenirMeshDepuisCache(main.ID, main.IndexMorphologique);
+        Mesh m = main.EstUnEclat ? main.MeshEclat : ObtenirMeshDepuisCache(main.ID, main.IndexMorphologique);
         _objetEnMain.Mesh = m;
-        if (m != null)
+        if (m != null && !main.EstUnEclat)
             AppliquerMaterielObjet(_objetEnMain, main.ID, main.IndexChimique);
+        // Éclat : le mesh a déjà le matériel intégré (SurfaceTool)
     }
 
     /// <summary>Assigne le Mesh exact au SubViewport de chaque slot (pierre en 3D dans l'UI).</summary>
@@ -231,10 +272,11 @@ public partial class Joueur : CharacterBody3D
             meshNode.Mesh = null;
             return;
         }
-        Mesh m = ObtenirMeshDepuisCache(slot.ID, slot.IndexMorphologique);
+        Mesh m = slot.EstUnEclat ? slot.MeshEclat : ObtenirMeshDepuisCache(slot.ID, slot.IndexMorphologique);
         meshNode.Mesh = m;
-        if (m != null)
+        if (m != null && !slot.EstUnEclat)
             AppliquerMaterielObjet(meshNode, slot.ID, slot.IndexChimique);
+        // Éclat : le mesh a déjà le matériel intégré
     }
 
     /// <summary>Cache le SubViewport quand pas de pierre procédurale, pour laisser voir la couleur du slot.</summary>
@@ -270,19 +312,21 @@ public partial class Joueur : CharacterBody3D
     /// <summary>Phase 1 pure : minage du terrain Marching Cubes uniquement. Clic gauche.</summary>
     private void ExecuterMinageVoxel()
     {
+        _rayon.ForceRaycastUpdate();
         if (!_rayon.IsColliding()) return;
-        Node objetTouche = (Node)_rayon.GetCollider();
+        Object colliderObj = _rayon.GetCollider();
+        Node objetTouche = colliderObj as Node;
+        // Si on touche un objet physique valide, on annule le minage
+        if (objetTouche != null && (objetTouche is ItemPhysique || objetTouche is RigidBody3D || objetTouche.IsInGroup("BlocsPoses"))) return;
 
-        // Si le rayon frappe un objet physique (Caillou/Silex/BlocPose), on ne fait rien avec le clic gauche
-        if (objetTouche is RigidBody3D) return;
-        if (objetTouche.IsInGroup("BlocsPoses")) return;
-        if (objetTouche is StaticBody3D sb && sb.GetNodeOrNull<ItemPhysique>("ItemPhysique") != null) return;
-
+        // Si objetTouche est null, cela signifie qu'on a touché le terrain bas-niveau ! ON CONTINUE LE MINAGE.
         Vector3 pointImpact = _rayon.GetCollisionPoint();
         Vector3 normaleImpact = _rayon.GetCollisionNormal();
         Vector3 pointDeSondage = pointImpact - (normaleImpact * 0.1f);
 
         int idExtrait = _gestionnaireMonde?.ObtenirMatiereExacte(pointDeSondage) ?? 1;
+        // Toujours terrain (1-9) pour que la pose refusionne avec le sol ; jamais 10/11/12/999 (bloc vert).
+        if (idExtrait < 1 || idExtrait > 9) idExtrait = 1;
 
         if (MainGaucheEstActive && !MainGauche.EstVide && !MainDroite.EstVide) return;
         if (!MainGaucheEstActive && !MainDroite.EstVide && !MainGauche.EstVide) return;
@@ -311,24 +355,40 @@ public partial class Joueur : CharacterBody3D
         if (!_rayon.IsColliding()) return;
 
         Node objetTouche = (Node)_rayon.GetCollider();
+        if (objetTouche == null) return;
+
         SlotInventaire nouveauSlot = default;
 
         if (objetTouche.IsInGroup("BlocsPoses"))
         {
             int id = objetTouche.HasMeta("ID_Matiere") ? (int)objetTouche.GetMeta("ID_Matiere").AsInt32() : 1;
-            var item = objetTouche.GetNodeOrNull<ItemPhysique>("ItemPhysique");
-            nouveauSlot = new SlotInventaire { ID = id, IndexMorphologique = item?.IndexCacheMemoire ?? 0, IndexChimique = item?.IndexChimique ?? 0 };
+            var item = objetTouche as ItemPhysique ?? (objetTouche as Node)?.GetNodeOrNull<ItemPhysique>("ItemPhysique");
+            nouveauSlot = new SlotInventaire
+            {
+                ID = id,
+                IndexMorphologique = item?.IndexCacheMemoire ?? 0,
+                IndexChimique = item?.IndexChimique ?? 0,
+                EstUnEclat = item?.EstUnEclat ?? false,
+                MeshEclat = (item != null && item.EstUnEclat) ? item.ObtenirMeshVisuel() : null
+            };
         }
         else if (objetTouche is RigidBody3D rb)
         {
-            var item = rb.GetNodeOrNull<ItemPhysique>("ItemPhysique");
+            var item = rb as ItemPhysique ?? rb.GetNodeOrNull<ItemPhysique>("ItemPhysique");
             if (item == null) return;
             if (item.ID_Objet == 13 || item.ID_Objet == 14)
             {
                 GD.Print("ZERO-K : Masse excessive. La colonne vertébrale céderait. Action bloquée.");
                 return;
             }
-            nouveauSlot = new SlotInventaire { ID = item.ID_Objet, IndexMorphologique = item.IndexCacheMemoire, IndexChimique = item.IndexChimique };
+            nouveauSlot = new SlotInventaire
+            {
+                ID = item.ID_Objet,
+                IndexMorphologique = item.IndexCacheMemoire,
+                IndexChimique = item.IndexChimique,
+                EstUnEclat = item.EstUnEclat,
+                MeshEclat = item.EstUnEclat ? item.ObtenirMeshVisuel() : null
+            };
         }
         else if (objetTouche is StaticBody3D sb)
         {
@@ -339,7 +399,14 @@ public partial class Joueur : CharacterBody3D
                 GD.Print("ZERO-K : Masse excessive. La colonne vertébrale céderait. Action bloquée.");
                 return;
             }
-            nouveauSlot = new SlotInventaire { ID = item.ID_Objet, IndexMorphologique = item.IndexCacheMemoire, IndexChimique = item.IndexChimique };
+            nouveauSlot = new SlotInventaire
+            {
+                ID = item.ID_Objet,
+                IndexMorphologique = item.IndexCacheMemoire,
+                IndexChimique = item.IndexChimique,
+                EstUnEclat = item.EstUnEclat,
+                MeshEclat = item.EstUnEclat ? item.ObtenirMeshVisuel() : null
+            };
         }
         else
             return;
@@ -371,6 +438,7 @@ public partial class Joueur : CharacterBody3D
             return;
         }
 
+        _rayon.ForceRaycastUpdate();
         if (!_rayon.IsColliding()) return;
 
         Vector3 pointImpact = _rayon.GetCollisionPoint();
@@ -380,10 +448,13 @@ public partial class Joueur : CharacterBody3D
         if (distance < 1.4f) return;
 
         int id = mainActive.ID;
+        if (id == 0) return; // Slot vide ou invalide
+        // Terrain (terre, roche, sable, etc.) → modifier les voxels du monde (fusion avec le sol)
         if (id >= 1 && id <= 9 && id != 4)
         {
             _gestionnaireMonde?.AppliquerCreationGlobale(pointImpact, normaleImpact, RAYON_SCULPTURE, id);
         }
+        // Objets physiques (roches, silex, buisson) → déposer un bloc au sol
         else if (id == 999 || id == 10 || id == 11 || id == 12)
         {
             CreerBlocPose(pointDeChute, mainActive);
@@ -399,26 +470,101 @@ public partial class Joueur : CharacterBody3D
         RafraichirHUD();
     }
 
-    /// <summary>Crée un bloc physique posé avec IndexCacheMemoire assigné (forme exacte conservée au rejet).</summary>
-    private void CreerBlocPose(Vector3 pointDeChute, SlotInventaire mainActive)
+    /// <summary>Frappe la roche visée : impulsion + dégâts. Si résistance à 0 → fracture. force = temps de charge (0.1 à 2 s).</summary>
+    private void ExecuterFrappe(float force)
+    {
+        SlotInventaire mainActive = MainGaucheEstActive ? MainGauche : MainDroite;
+        if (mainActive.EstVide || !EstObjetProcedural(mainActive.ID)) return;
+        _rayon.ForceRaycastUpdate();
+        if (!_rayon.IsColliding()) return;
+
+        Object colliderObj = _rayon.GetCollider();
+        Node objetTouche = colliderObj as Node;
+        if (objetTouche == null) return; // Pas de cible valide (terrain bas-niveau ou autre)
+
+        RigidBody3D rbCible = objetTouche as RigidBody3D;
+        if (rbCible == null && objetTouche.HasNode("ItemPhysique"))
+        {
+            var parentRb = objetTouche.GetParent() as RigidBody3D;
+            if (parentRb != null) rbCible = parentRb;
+        }
+        if (rbCible == null) return;
+
+        var item = rbCible as ItemPhysique ?? rbCible.GetNodeOrNull<ItemPhysique>("ItemPhysique");
+        if (item == null) return;
+
+        Vector3 dirFrappe = -_rayon.GetCollisionNormal();
+        float impulsionFrappe = 4f * force * (1f + rbCible.Mass * 0.5f);
+        rbCible.ApplyCentralImpulse(dirFrappe * impulsionFrappe);
+        float degats = 15f * force * (1f + rbCible.Mass * 0.2f);
+        item.ResistanceActuelle -= degats;
+        if (item.ResistanceActuelle <= 0)
+        {
+            Vector3 pointImpact = _rayon.GetCollisionPoint();
+            Vector3 dirVue = (pointImpact - _camera.GlobalPosition).Normalized();
+            item.FracturerPublic(dirVue, pointImpact);
+        }
+    }
+
+    /// <summary>Lance la roche tenue : spawn devant la caméra + impulsion (évite le bug sous la map du Raycast).</summary>
+    private void ExecuterLancer(float force)
+    {
+        SlotInventaire mainActive = MainGaucheEstActive ? MainGauche : MainDroite;
+        if (mainActive.EstVide) return;
+
+        // 1. On spawn la roche légèrement devant la caméra pour éviter de la jeter dans notre propre corps
+        Vector3 direction = -_camera.GlobalTransform.Basis.Z.Normalized();
+        Vector3 pointDeSpawn = _camera.GlobalPosition + (direction * 1.5f);
+
+        // 2. On invoque le bloc
+        Node3D corpsCree = CreerBlocPose(pointDeSpawn, mainActive);
+
+        // 3. Si c'est un objet soumis à la gravité, on applique l'énergie cinétique
+        if (corpsCree is RigidBody3D rb)
+        {
+            rb.ApplyCentralImpulse(direction * (15f * force));
+        }
+
+        // 4. On vide la main
+        if (MainGaucheEstActive) MainGauche = default;
+        else MainDroite = default;
+        RafraichirHUD();
+    }
+
+    /// <summary>Crée un bloc physique posé avec IndexCacheMemoire assigné (forme exacte conservée au rejet). Retourne le nœud créé (pour lancer avec impulsion). ItemPhysique est le RigidBody3D racine.</summary>
+    private Node3D CreerBlocPose(Vector3 pointDeChute, SlotInventaire mainActive)
     {
         int id = mainActive.ID;
         Node3D corps;
-        if (id == 10 || id == 12) // Petite Pierre ou Pierre Moyenne
+        if (mainActive.EstUnEclat && mainActive.MeshEclat != null)
+        {
+            // Reconstruction de l'éclat jeté : mesh dynamique conservé, reste un éclat pour la vie
+            var item = new ItemPhysique
+            {
+                ID_Objet = mainActive.ID,
+                IndexChimique = mainActive.IndexChimique,
+                EstUnEclat = true,
+                Name = "ItemPhysique"
+            };
+            item.AddChild(new MeshInstance3D { Name = "MeshInstance3D", Mesh = mainActive.MeshEclat });
+            item.AddChild(new CollisionShape3D { Name = "CollisionShape3D", Shape = mainActive.MeshEclat.CreateConvexShape(true, false) });
+            corps = item;
+        }
+        else if (id == 10 || id == 12) // Petite Pierre ou Pierre Moyenne (ItemPhysique = RigidBody3D)
         {
             float rayon = id == 10 ? 0.15f : 0.25f;
             float hauteur = rayon * 2f;
-            var rb = new RigidBody3D();
-            rb.AddChild(new MeshInstance3D { Mesh = new SphereMesh { Radius = rayon, Height = hauteur } });
-            rb.AddChild(new CollisionShape3D { Shape = new SphereShape3D { Radius = rayon } });
-            corps = rb;
+            var item = new ItemPhysique { ID_Objet = id, IndexCacheMemoire = mainActive.IndexMorphologique, IndexChimique = mainActive.IndexChimique, Name = "ItemPhysique" };
+            item.AddChild(new MeshInstance3D { Mesh = new SphereMesh { Radius = rayon, Height = hauteur } });
+            item.AddChild(new CollisionShape3D { Shape = new SphereShape3D { Radius = rayon } });
+            corps = item;
         }
-        else if (id == 11) // Silex
+        else if (id == 11) // Silex (ItemPhysique = RigidBody3D, l'eau gère le ralentissement)
         {
-            var sb = new StaticBody3D();
-            sb.AddChild(new MeshInstance3D { Mesh = new PrismMesh { Size = new Vector3(0.2f, 0.15f, 0.25f) } });
-            sb.AddChild(new CollisionShape3D { Shape = new BoxShape3D { Size = new Vector3(0.2f, 0.15f, 0.25f) } });
-            corps = sb;
+            var item = new ItemPhysique { ID_Objet = id, IndexCacheMemoire = mainActive.IndexMorphologique, IndexChimique = mainActive.IndexChimique, Name = "ItemPhysique" };
+            item.AddChild(new MeshInstance3D { Mesh = new PrismMesh { Size = new Vector3(0.2f, 0.15f, 0.25f) } });
+            item.AddChild(new CollisionShape3D { Shape = new BoxShape3D { Size = new Vector3(0.2f, 0.15f, 0.25f) } });
+            corps = item;
         }
         else // 999 Buisson
         {
@@ -429,19 +575,24 @@ public partial class Joueur : CharacterBody3D
         }
         corps.SetMeta("ID_Matiere", id);
         corps.AddToGroup("BlocsPoses");
-        if (id == 10 || id == 11 || id == 12)
-        {
-            var item = new ItemPhysique { ID_Objet = id, IndexCacheMemoire = mainActive.IndexMorphologique, IndexChimique = mainActive.IndexChimique, Name = "ItemPhysique" };
-            corps.AddChild(item);
-        }
         GetParent().AddChild(corps);
         corps.GlobalPosition = pointDeChute;
+        return corps;
     }
 
     private float _tempsAttenteSpawn;
 
     public override void _PhysicsProcess(double delta)
     {
+        float dt = (float)delta;
+        SlotInventaire mainActive = MainGaucheEstActive ? MainGauche : MainDroite;
+
+        if (_gaucheMaintenu)
+            _tempsChargeGauche += dt;
+        // Clic droit maintenu avec main pleine = charge du lancer
+        if (!mainActive.EstVide && Input.IsActionPressed("clic_droit"))
+            _forceLancer = Mathf.Min(1f, _forceLancer + VitesseChargeBras * dt);
+
         Vector3 velocity = Velocity;
         bool spawnPret = _gestionnaireMonde == null || _gestionnaireMonde.EstSpawnPret();
 

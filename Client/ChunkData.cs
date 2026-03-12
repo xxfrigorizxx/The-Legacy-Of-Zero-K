@@ -105,14 +105,17 @@ public class ChunkData
 		}
 		if (PhysicsBodyRID.IsValid)
 		{
+			// Retirer la shape du body avant de la libérer, sinon le body la détruit et double free au Dispose().
+			PhysicsServer3D.Singleton.BodyRemoveShape(PhysicsBodyRID, 0);
 			PhysicsServer3D.Singleton.FreeRid(PhysicsBodyRID);
 			PhysicsBodyRID = default;
 		}
-		if (PhysicsShapeRID.IsValid)
+		if (_shapeRef != null)
 		{
-			PhysicsServer3D.Singleton.FreeRid(PhysicsShapeRID);
-			PhysicsShapeRID = default;
+			_shapeRef.Dispose();
+			_shapeRef = null;
 		}
+		PhysicsShapeRID = default;
 		_meshRef = null;
 		_shapeRef = null;
 		_meshEauRef = null;

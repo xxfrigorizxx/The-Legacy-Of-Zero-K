@@ -147,9 +147,9 @@ public partial class Monde_Serveur : Node
 				continue; // Chunk déjà ressuscité du disque — ignorer le résultat procédural.
 			if (!_chunks.ContainsKey(result.coord))
 				_chunks[result.coord] = result.chunk;
-			DeclencherEnsemencement(result.coord, result.chunk, TailleChunk);
-			var donnees = _chunks[result.coord].ObtenirDonneesPourClient();
-			_fileEnvoiReseau.Enqueue(new ColisChunk { Coord = result.coord, Donnees = donnees });
+			// Envoi client uniquement APRÈS stase remplie, sinon LibererRochesChunk trouve une liste vide
+			DeclencherEnsemencement(result.coord, result.chunk, TailleChunk, (coord, ch) =>
+				_fileEnvoiReseau.Enqueue(new ColisChunk { Coord = coord, Donnees = ch.ObtenirDonneesPourClient() }));
 		}
 
 		// Manufacture parallèle : purge des obsolètes puis extraction radiale
@@ -212,8 +212,16 @@ public partial class Monde_Serveur : Node
 				// BRANCHE COMMUNE : Chunk ressuscité. Pierres : chargement sauvegardées si fichier existe, sinon procédural. Spawn uniquement quand chunk demandé (visible écran).
 				_chunks[chunkCible] = chunkActuel;
 				if (!ChargerEtSpawnerPierresChunk(chunkCible))
-					DeclencherEnsemencement(chunkCible, chunkActuel, TailleChunk);
-				_fileEnvoiReseau.Enqueue(new ColisChunk { Coord = chunkCible, Donnees = chunkActuel.ObtenirDonneesPourClient() });
+				{
+					// Attendre que l'ensemencement asynchrone finisse AVANT d'envoyer le chunk au réseau
+					DeclencherEnsemencement(chunkCible, chunkActuel, TailleChunk, (coord, ch) =>
+						_fileEnvoiReseau.Enqueue(new ColisChunk { Coord = coord, Donnees = ch.ObtenirDonneesPourClient() }));
+				}
+				else
+				{
+					// Si chargé depuis le disque, on envoie directement
+					_fileEnvoiReseau.Enqueue(new ColisChunk { Coord = chunkCible, Donnees = chunkActuel.ObtenirDonneesPourClient() });
+				}
 			}
 		}
 
@@ -431,8 +439,8 @@ public partial class Monde_Serveur : Node
 	private const int RAYON_ACTIVATION_PIERRES_CHUNKS = 2;
 	private const int ID_PETITE_PIERRE = 10;
 
-	/// <summary>Délai de synchronisation : attend 2 frames physiques, puis enfile sur le tapis roulant (ordre spatial logique).</summary>
-	private async void DeclencherEnsemencement(Vector2I chunkCoord, Chunk_Serveur chunk, float tailleChunk)
+	/// <summary>Délai de synchronisation : attend 2 frames physiques, puis enfile sur le tapis roulant (ordre spatial logique). Si onStasePrete est fourni (chunk procédural), on enqueue l'envoi client seulement après la stase → évite LibererRochesChunk à vide.</summary>
+	private async void DeclencherEnsemencement(Vector2I chunkCoord, Chunk_Serveur chunk, float tailleChunk, Action<Vector2I, Chunk_Serveur> onStasePrete = null)
 	{
 		await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame);
 		await ToSignal(GetTree(), SceneTree.SignalName.PhysicsFrame);
@@ -441,6 +449,7 @@ public partial class Monde_Serveur : Node
 		foreach (var (pos, id) in positionsFiltrees)
 			aEnfiler.Add((pos, id, -1, -1));
 		MettreRochesEnStase(chunkCoord, aEnfiler);
+		onStasePrete?.Invoke(chunkCoord, chunk);
 	}
 
 	private const int ID_SILEX = 11;
@@ -559,20 +568,19 @@ public partial class Monde_Serveur : Node
 	private void GenererItemPhysique(Vector3 position, int idObjet, int indexCache = -1, int indexChimique = -1)
 	{
 		if (_parentPourBlocsChutants == null) return;
-		RigidBody3D rb = null;
+		ItemPhysique rb = null;
 		if (_poolsRochesParTaille.TryGetValue(idObjet, out var pool) && pool.Count > 0)
 		{
-			rb = pool[pool.Count - 1];
+			rb = pool[pool.Count - 1] as ItemPhysique;
 			pool.RemoveAt(pool.Count - 1);
-			var item = rb.GetNodeOrNull<ItemPhysique>("ItemPhysique");
-			if (item != null)
+			if (rb != null)
 			{
-				item.ID_Objet = idObjet;
-				item.IndexCacheMemoire = indexCache;
-				item.IndexChimique = indexChimique;
-				item.ReappliquerApparence();
+				rb.ID_Objet = idObjet;
+				rb.IndexCacheMemoire = indexCache;
+				rb.IndexChimique = indexChimique;
+				rb.ReappliquerApparence();
+				rb.Freeze = true; // Stase : ReveillerPierresDansRayon dégèle à 2 chunks (terrain solide)
 			}
-			rb.Freeze = true;
 		}
 		else
 			rb = CreerNouvelleRoche(idObjet, indexCache, indexChimique);
@@ -580,6 +588,7 @@ public partial class Monde_Serveur : Node
 		{
 			_parentPourBlocsChutants.AddChild(rb);
 			rb.GlobalPosition = position;
+			rb.Freeze = true; // Dormance : gravité seulement à 2 chunks du joueur (évite chute dans le vide)
 		}
 		catch (Exception ex)
 		{
@@ -588,8 +597,8 @@ public partial class Monde_Serveur : Node
 		}
 	}
 
-	/// <summary>Crée une roche neuve (mesh/collision selon id). N'est pas ajoutée au parent.</summary>
-	private RigidBody3D CreerNouvelleRoche(int idObjet, int indexCache, int indexChimique)
+	/// <summary>Crée une roche neuve (ItemPhysique = RigidBody3D racine). N'est pas ajoutée au parent.</summary>
+	private ItemPhysique CreerNouvelleRoche(int idObjet, int indexCache, int indexChimique)
 	{
 		float rayon = idObjet == ID_SILEX ? 0.12f
 			: idObjet == ID_PETITE_PIERRE ? 0.15f
@@ -598,18 +607,16 @@ public partial class Monde_Serveur : Node
 			: 0.6f;
 		float hauteur = idObjet == ID_SILEX ? 0.24f : rayon * 2f;
 
-		var rb = new RigidBody3D();
-		rb.Mass = 1.0f;
-		rb.PhysicsMaterialOverride = new PhysicsMaterial { Friction = 0.6f, Bounce = 0.1f };
-		rb.Freeze = true;
+		var item = new ItemPhysique { ID_Objet = idObjet, IndexCacheMemoire = indexCache, IndexChimique = indexChimique, Name = "ItemPhysique" };
+		item.Mass = 1.0f;
+		item.PhysicsMaterialOverride = new PhysicsMaterial { Friction = 0.6f, Bounce = 0.1f };
+		// Freeze géré par ReveillerPierresDansRayon (2 chunks) pour éviter chute dans le vide
 
 		Mesh meshBase = idObjet == ID_SILEX ? new PrismMesh { Size = new Vector3(0.2f, 0.15f, 0.25f) } : new SphereMesh { Radius = rayon, Height = hauteur };
 		Shape3D shapeBase = idObjet == ID_SILEX ? new BoxShape3D { Size = new Vector3(0.2f, 0.15f, 0.25f) } : new SphereShape3D { Radius = rayon };
-		rb.AddChild(new MeshInstance3D { Mesh = meshBase });
-		rb.AddChild(new CollisionShape3D { Shape = shapeBase });
-		var item = new ItemPhysique { ID_Objet = idObjet, IndexCacheMemoire = indexCache, IndexChimique = indexChimique, Name = "ItemPhysique" };
-		rb.AddChild(item);
-		return rb;
+		item.AddChild(new MeshInstance3D { Mesh = meshBase });
+		item.AddChild(new CollisionShape3D { Shape = shapeBase });
+		return item;
 	}
 
 	/// <summary>Rayon en unités : pierres gelées se réveillent quand joueur entre (2 chunks = terrain chargé).</summary>
@@ -624,15 +631,15 @@ public partial class Monde_Serveur : Node
 		foreach (Node child in _parentPourBlocsChutants.GetChildren())
 		{
 			if (child is not RigidBody3D rb) continue;
-			var item = rb.GetNodeOrNull<ItemPhysique>("ItemPhysique");
+			var item = rb as ItemPhysique ?? rb.GetNodeOrNull<ItemPhysique>("ItemPhysique");
 			if (item == null) continue;
 			int id = item.ID_Objet;
 			if (id != ID_PETITE_PIERRE && id != ID_PIERRE_MOYENNE && id != ID_GROSSE_PIERRE && id != ID_TRES_GROSSE_PIERRE && id != ID_SILEX) continue;
 			float distCarre = rb.GlobalPosition.DistanceSquaredTo(posJoueur);
 			if (distCarre <= rayonCarre)
-				rb.Freeze = false;
+				rb.Freeze = false; // Réveiller : gravité + terrain solide
 			else
-				rb.Freeze = true; // Endormir immédiatement dès qu'il sort du rayon ou se simplifie (sommeil physique)
+				rb.Freeze = true;  // Endormir hors 2 chunks : évite chute dans le vide
 		}
 	}
 
@@ -647,8 +654,9 @@ public partial class Monde_Serveur : Node
 		var pierres = new List<(Vector3 pos, int id, int index, int chimique)>();
 		foreach (Node child in _parentPourBlocsChutants.GetChildren())
 		{
-			var item = child.GetNodeOrNull<ItemPhysique>("ItemPhysique");
+			var item = child as ItemPhysique ?? child.GetNodeOrNull<ItemPhysique>("ItemPhysique");
 			if (item == null) continue;
+			if (item.EstEclatFracture) continue; // Éclats de fracture : pas sauvegardés (créés à l'instant, supprimés quand chunk déchargé).
 			int id = item.ID_Objet;
 			if (id < 10 || id > 14) continue;
 			Vector3 pos = (child as Node3D)?.GlobalPosition ?? Vector3.Zero;
@@ -722,7 +730,7 @@ public partial class Monde_Serveur : Node
 		var aRetirer = new List<Node>();
 		foreach (Node child in _parentPourBlocsChutants.GetChildren())
 		{
-			var item = child.GetNodeOrNull<ItemPhysique>("ItemPhysique");
+			var item = child as ItemPhysique ?? child.GetNodeOrNull<ItemPhysique>("ItemPhysique");
 			if (item == null) continue;
 			if (item.ID_Objet < 10 || item.ID_Objet > 14) continue;
 			Vector3 pos = (child as Node3D)?.GlobalPosition ?? Vector3.Zero;
@@ -731,12 +739,18 @@ public partial class Monde_Serveur : Node
 		}
 		foreach (var n in aRetirer)
 		{
-			var item = n.GetNodeOrNull<ItemPhysique>("ItemPhysique");
+			var item = n as ItemPhysique ?? n.GetNodeOrNull<ItemPhysique>("ItemPhysique");
 			int id = item?.ID_Objet ?? 0;
 			_parentPourBlocsChutants.RemoveChild(n);
+			// Les éclats de fracture sont créés à l'instant, jamais remis au pool (sinon roches infinies).
+			if (item != null && item.EstEclatFracture)
+			{
+				n.QueueFree();
+				continue;
+			}
 			if (n is RigidBody3D rb && id >= 10 && id <= 14 && _poolsRochesParTaille.TryGetValue(id, out var pool) && pool.Count < TaillePoolParType)
 			{
-				rb.Freeze = true;
+				rb.Freeze = true; // En pool = figé pour réutilisation ; dégelé à la sortie (GenererItemPhysique)
 				pool.Add(rb);
 			}
 			else
