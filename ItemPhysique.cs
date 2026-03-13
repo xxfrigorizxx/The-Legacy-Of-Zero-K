@@ -44,6 +44,8 @@ public partial class ItemPhysique : RigidBody3D
 	public bool EstEclatFracture { get; set; }
 	/// <summary>Bouclier d'amnésie : si true, _Ready() n'écrase pas le maillage tranché (pas de chargement depuis le cache).</summary>
 	public bool EstUnEclat = false;
+	/// <summary>Nombre de fractures subies (0 = roche intacte). Au-delà de 5, le fragment devient poudre et disparaît.</summary>
+	public int NiveauFracture = 0;
 
 	/// <summary>Banque d'ADN : accès public pour rendu en main et UI inventaire.</summary>
 	public static IReadOnlyList<Mesh> CacheMeshCaillou => _cacheMeshCaillou;
@@ -60,6 +62,9 @@ public partial class ItemPhysique : RigidBody3D
 	/// <summary>Cache des matériaux procéduraux (évite le freeze à la cassure : pas de génération 256×256 à chaque éclat).</summary>
 	private static readonly Dictionary<(bool silex, int idx, bool eclat), StandardMaterial3D> _cacheMateriaux = new Dictionary<(bool, int, bool), StandardMaterial3D>();
 	private const int MaxPointsContourFragment = 48;
+
+	/// <summary>True si BodyEntered a été connecté par nous (évite "disconnect nonexistent" à la fracture).</summary>
+	private bool _surImpactConnecte = false;
 
 	public override void _Ready()
 	{
@@ -97,6 +102,7 @@ public partial class ItemPhysique : RigidBody3D
 			ContactMonitor = true;
 			MaxContactsReported = 1;
 			BodyEntered += SurImpactPhysique;
+			_surImpactConnecte = true;
 		}
 
 		// Appliquer la forme EXACTE depuis le cache
@@ -195,6 +201,12 @@ public partial class ItemPhysique : RigidBody3D
 			QueueFree();
 			return;
 		}
+		// Au-delà de 5 fractures : poudre, disparition (plus de fragments)
+		if (NiveauFracture > 5)
+		{
+			QueueFree();
+			return;
+		}
 
 		Vector3 normaleCoupe;
 		if (directionVueMonde.HasValue && directionVueMonde.Value.LengthSquared() > 0.01f)
@@ -209,19 +221,32 @@ public partial class ItemPhysique : RigidBody3D
 		Vector3 normalMonde = GlobalTransform.Basis * normaleCoupe;
 		float masseFragment = Mass * 0.5f;
 
-		// Découpe de la roche exacte au plan : 2 moitiés avec la texture d'origine (modèles temporaires jusqu'à destruction)
-		Material matRoche = monVisuel.MaterialOverride ?? (monVisuel.Mesh.GetSurfaceCount() > 0 ? monVisuel.Mesh.SurfaceGetMaterial(0) : null);
-		if (matRoche != null && monVisuel.Mesh is ArrayMesh arrMesh && DecouperMeshEtSpawnerMoities(arrMesh, planCoupe, impactPos, normalMonde, masseFragment, matRoche))
+		// Priorité : morceaux préfabriqués variés + triplanar (géométrie propre, plus de pointes/noir)
+		if (SpawnChunksPrefabriques(impactPos, normalMonde, masseFragment))
 		{
-			if (ID_Objet != 11)
-				BodyEntered -= SurImpactPhysique;
-			QueueFree();
+			if (ID_Objet != 11 && _surImpactConnecte) { BodyEntered -= SurImpactPhysique; _surImpactConnecte = false; }
+			QueueFree(); // LA MÈRE EST DÉTRUITE ICI. AUCUNE EXCEPTION.
 			return;
 		}
 
-		// Fallback : méthode par contour (si découpe mesh échoue)
+		// Fallback : découpe de la roche exacte au plan
+		Material matRoche = monVisuel.MaterialOverride ?? (monVisuel.Mesh.GetSurfaceCount() > 0 ? monVisuel.Mesh.SurfaceGetMaterial(0) : null);
+		if (matRoche != null && monVisuel.Mesh is ArrayMesh arrMesh && DecouperMeshEtSpawnerMoities(arrMesh, planCoupe, impactPos, normalMonde, masseFragment, matRoche, Scale))
+		{
+			if (ID_Objet != 11 && _surImpactConnecte) { BodyEntered -= SurImpactPhysique; _surImpactConnecte = false; }
+			QueueFree(); // LA MÈRE EST DÉTRUITE ICI. AUCUNE EXCEPTION.
+			return;
+		}
+
+		// Fallback : méthode par contour (si découpe mesh échoue). Cuire le scale dans les sommets pour éviter accordéon UV.
 		Vector3[] sommetsActuels = monVisuel.Mesh.GetFaces();
 		if (sommetsActuels == null || sommetsActuels.Length == 0) { QueueFree(); return; }
+		Vector3 echelleMere = Scale;
+		for (int i = 0; i < sommetsActuels.Length; i++)
+		{
+			Vector3 p = sommetsActuels[i];
+			sommetsActuels[i] = new Vector3(p.X * echelleMere.X, p.Y * echelleMere.Y, p.Z * echelleMere.Z);
+		}
 		var ptsA = new List<Vector3>();
 		var ptsB = new List<Vector3>();
 		foreach (Vector3 pt in sommetsActuels)
@@ -236,12 +261,69 @@ public partial class ItemPhysique : RigidBody3D
 		Vector3[] facesB = ptsB.Count >= 4 ? OrdonnerPointsDansPlan(ptsB, planCoupe) : PointsFallbackFragment(planCoupe, -1);
 		SpawnEclatVrai(facesA, masseFragment, impactPos + (normalMonde * 0.03f), normaleCoupe);
 		SpawnEclatVrai(facesB, masseFragment, impactPos - (normalMonde * 0.03f), -normaleCoupe);
-		if (ID_Objet != 11) BodyEntered -= SurImpactPhysique;
-		QueueFree();
+		if (ID_Objet != 11 && _surImpactConnecte) { BodyEntered -= SurImpactPhysique; _surImpactConnecte = false; }
+		QueueFree(); // LA MÈRE EST DÉTRUITE ICI. AUCUNE EXCEPTION. AUCUN RECYCLAGE.
 	}
 
-	/// <summary>Découpe le mesh de la roche au plan et crée 2 moitiés (même texture, modèles temporaires). Retourne true si succès.</summary>
-	private bool DecouperMeshEtSpawnerMoities(ArrayMesh mesh, Plane plan, Vector3 impactPos, Vector3 normalMonde, float masseFragment, Material matRoche)
+	/// <summary>Spawn 2 morceaux préfabriqués depuis le cache (formes variées) + triplanar. Géométrie propre, plus de pointes ni faces noires. Retourne true si succès.</summary>
+	private bool SpawnChunksPrefabriques(Vector3 impactPos, Vector3 normalMonde, float masseFragment)
+	{
+		bool estSilex = (ID_Objet == 11);
+		var cacheMesh = estSilex ? _cacheMeshSilex : _cacheMeshCaillou;
+		var cacheCollision = estSilex ? _cacheCollisionSilex : _cacheCollisionCaillou;
+		lock (cacheMesh)
+		{
+			if (cacheMesh.Count < 4) return false; // besoin d'au moins 2 formes "cassées" (2e moitié)
+			int idxA = PreparerCacheEtTirerIndex(estSilex, true);
+			int idxB = PreparerCacheEtTirerIndex(estSilex, true);
+			if (idxA == idxB && cacheMesh.Count > 1) idxB = (idxA + 1) % cacheMesh.Count;
+			Mesh meshA = cacheMesh[idxA];
+			Mesh meshB = cacheMesh[idxB];
+			Shape3D shapeA = idxA < cacheCollision.Count ? cacheCollision[idxA] : null;
+			Shape3D shapeB = idxB < cacheCollision.Count ? cacheCollision[idxB] : null;
+			Vector3 scaleFragment = new Vector3(0.65f, 0.65f, 0.65f); // fragments plus petits
+			for (int i = 0; i < 2; i++)
+			{
+				Mesh m = (i == 0) ? meshA : meshB;
+				Shape3D s = (i == 0) ? shapeA : shapeB;
+				ItemPhysique frag = new ItemPhysique();
+				frag.EstUnEclat = true;
+				frag.EstEclatFracture = true;
+				frag.NiveauFracture = NiveauFracture + 1;
+				frag.ID_Objet = ID_Objet;
+				frag.IndexChimique = IndexChimique;
+				frag.Mass = masseFragment;
+				int idxCh = Mathf.Clamp(IndexChimique, 0, TableGeologique.Length - 1);
+				frag.ResistanceActuelle = TableGeologique[idxCh].ResistanceFuture * (masseFragment / 50f);
+				frag.ContinuousCd = true;
+				frag.Scale = scaleFragment;
+				var visuel = new MeshInstance3D { Mesh = m, CastShadow = GeometryInstance3D.ShadowCastingSetting.On };
+				StandardMaterial3D mat = (StandardMaterial3D)CreerMaterielProcedural(estSilex, IndexChimique, pourEclat: false).Duplicate(true);
+				mat.CullMode = BaseMaterial3D.CullModeEnum.Disabled;
+				mat.Roughness = 0.95f;
+				mat.NormalEnabled = false;
+				mat.Uv1Triplanar = true;
+				mat.Uv1WorldTriplanar = true;
+				mat.Uv1Scale = new Vector3(1.2f, 1.2f, 1.2f);
+				visuel.MaterialOverride = mat;
+				frag.AddChild(visuel);
+				frag.AddChild(new CollisionShape3D { Shape = s ?? new BoxShape3D { Size = new Vector3(0.12f, 0.12f, 0.12f) } });
+				if (frag.ID_Objet != 11) { frag.ContactMonitor = true; frag.MaxContactsReported = 1; frag.BodyEntered += frag.SurImpactPhysique; frag._surImpactConnecte = true; }
+				frag.Name = "ItemPhysique";
+				frag.AddToGroup("BlocsPoses");
+				frag.SetMeta("ID_Matiere", frag.ID_Objet);
+				Vector3 pos = impactPos + (i == 0 ? 1 : -1) * normalMonde * 0.03f;
+				frag.SetMeta("spawn_pos", pos);
+				frag.SetMeta("spawn_impulse", (normalMonde * (i == 0 ? 0.6f : -0.6f) + new Vector3((float)GD.Randf() - 0.5f, 0.4f, (float)GD.Randf() - 0.5f)).Normalized() * 0.8f);
+				frag.TreeEntered += () => AppliquerSpawnEclat(frag);
+				GetParent().AddChild(frag);
+			}
+		}
+		return true;
+	}
+
+	/// <summary>Découpe le mesh de la roche au plan et crée 2 moitiés (même texture, modèles temporaires). echelleMere = cuisson du scale dans les sommets (évite accordéon).</summary>
+	private bool DecouperMeshEtSpawnerMoities(ArrayMesh mesh, Plane plan, Vector3 impactPos, Vector3 normalMonde, float masseFragment, Material matRoche, Vector3 echelleMere)
 	{
 		if (mesh == null || mesh.GetSurfaceCount() == 0) return false;
 		var mdt = new MeshDataTool();
@@ -263,19 +345,37 @@ public partial class ItemPhysique : RigidBody3D
 
 		if (trisA.Count == 0 || trisB.Count == 0) return false;
 
-		ArrayMesh meshA = ConstruireMeshMoitie(trisA, capA, plan, 1f);
-		ArrayMesh meshB = ConstruireMeshMoitie(trisB, capB, plan, -1f);
+		// Cuire le scale dans les sommets après la coupe (plan en local, résultats mis à l'échelle)
+		AppliquerScaleAuxTriangles(trisA, capA, echelleMere);
+		AppliquerScaleAuxTriangles(trisB, capB, echelleMere);
+
+		// Normale du cap : doit pointer vers l'extérieur de chaque moitié pour que la face de coupe soit visible (éviter backface culling = transparence)
+		ArrayMesh meshA = ConstruireMeshMoitie(trisA, capA, plan, -1f);  // moitié côté + du plan → cap visible depuis côté -
+		ArrayMesh meshB = ConstruireMeshMoitie(trisB, capB, plan, 1f);   // moitié côté - du plan → cap visible depuis côté +
 		if (meshA.GetFaces().Length == 0 || meshB.GetFaces().Length == 0) return false;
 
-		// Face de cassure : un côté transparent (intérieur), l'autre noir (cassure)
-		meshA.SurfaceSetMaterial(0, matRoche);
-		if (meshA.GetSurfaceCount() > 1) meshA.SurfaceSetMaterial(1, MatCapTransparent());
-		meshB.SurfaceSetMaterial(0, matRoche);
-		if (meshB.GetSurfaceCount() > 1) meshB.SurfaceSetMaterial(1, MatCapNoir());
-
+		// Un seul matériau global par fragment (MaterialOverride dans SpawnMoitieRoche) — pas de SurfaceSetMaterial pour compat inventaire / procédural.
 		SpawnMoitieRoche(meshA, impactPos + normalMonde * 0.02f, normalMonde, masseFragment);
 		SpawnMoitieRoche(meshB, impactPos - normalMonde * 0.02f, -normalMonde, masseFragment);
 		return true;
+	}
+
+	private static void AppliquerScaleAuxTriangles(
+		List<(Vector3 a, Vector3 b, Vector3 c, Vector2 uva, Vector2 uvb, Vector2 uvc, Vector3 na, Vector3 nb, Vector3 nc)> tris,
+		List<Vector3> cap, Vector3 echelle)
+	{
+		for (int i = 0; i < tris.Count; i++)
+		{
+			var t = tris[i];
+			tris[i] = (
+				new Vector3(t.a.X * echelle.X, t.a.Y * echelle.Y, t.a.Z * echelle.Z),
+				new Vector3(t.b.X * echelle.X, t.b.Y * echelle.Y, t.b.Z * echelle.Z),
+				new Vector3(t.c.X * echelle.X, t.c.Y * echelle.Y, t.c.Z * echelle.Z),
+				t.uva, t.uvb, t.uvc, t.na, t.nb, t.nc
+			);
+		}
+		for (int i = 0; i < cap.Count; i++)
+			cap[i] = new Vector3(cap[i].X * echelle.X, cap[i].Y * echelle.Y, cap[i].Z * echelle.Z);
 	}
 
 	private static void DecouperTriangle(Plane plan, Vector3 v0, Vector3 v1, Vector3 v2, Vector2 uv0, Vector2 uv1, Vector2 uv2, Vector3 n0, Vector3 n1, Vector3 n2,
@@ -337,100 +437,298 @@ public partial class ItemPhysique : RigidBody3D
 		}
 	}
 
-	/// <summary>Surface 0 = roche, surface 1 = face de cassure (cap). Les matériaux cap sont appliqués après (transparent / noir).</summary>
+	/// <summary>Adoucit le contour du cap vers un polygone régulier (enlève les coins pointus, garde plan et angles droits).</summary>
+	private static Vector3[] AdoucirContourCap(Vector3[] cap, Vector3 centrePlan, Vector3 u, Vector3 v, float forceAdoucissement)
+	{
+		if (cap == null || cap.Length < 4 || forceAdoucissement <= 0f) return cap;
+		float rayonMoyen = 0f;
+		foreach (Vector3 p in cap) rayonMoyen += (p - centrePlan).Length();
+		rayonMoyen /= cap.Length;
+		if (rayonMoyen < 0.001f) return cap;
+		var result = new Vector3[cap.Length];
+		for (int i = 0; i < cap.Length; i++)
+		{
+			Vector3 d = cap[i] - centrePlan;
+			float angle = Mathf.Atan2(d.Dot(v), d.Dot(u));
+			// Sommet correspondant du N-gone régulier
+			float rRegulier = rayonMoyen;
+			Vector3 ptRegulier = centrePlan + (float)Mathf.Cos(angle) * rRegulier * u + (float)Mathf.Sin(angle) * rRegulier * v;
+			result[i] = cap[i].Lerp(ptRegulier, forceAdoucissement);
+		}
+		return result;
+	}
+
+	/// <summary>Subdivision récursive pour triangles allongés de la peau (évite étirement texture). a,b,c déjà en espace adouci si applicable.</summary>
+	private static void SubdivTriPeau(SurfaceTool st, Vector3 a, Vector3 b, Vector3 c, Vector2 uva, Vector2 uvb, Vector2 uvc, Vector3 na, Vector3 nb, Vector3 nc, float ratioMax, Vector3[] bordOriginal = null, Vector3[] bordAdouci = null)
+	{
+		const float eps = 0.0005f;
+		float lab = a.DistanceTo(b), lbc = b.DistanceTo(c), lca = c.DistanceTo(a);
+		float longest = Mathf.Max(lab, Mathf.Max(lbc, lca));
+		float shortest = Mathf.Min(lab, Mathf.Min(lbc, lca));
+		if (shortest < eps || longest / shortest <= ratioMax)
+		{
+			if (a.DistanceSquaredTo(b) >= 0.000001f && b.DistanceSquaredTo(c) >= 0.000001f && c.DistanceSquaredTo(a) >= 0.000001f)
+			{
+				st.SetNormal(na); st.SetUV(uva); st.AddVertex(a);
+				st.SetNormal(nb); st.SetUV(uvb); st.AddVertex(b);
+				st.SetNormal(nc); st.SetUV(uvc); st.AddVertex(c);
+			}
+			return;
+		}
+		Vector3 m; Vector2 uvm; Vector3 nm;
+		if (longest == lab) { m = (a + b) * 0.5f; uvm = (uva + uvb) * 0.5f; nm = (na + nb).Normalized(); SubdivTriPeau(st, a, m, c, uva, uvm, uvc, na, nm, nc, ratioMax, bordOriginal, bordAdouci); SubdivTriPeau(st, m, b, c, uvm, uvb, uvc, nm, nb, nc, ratioMax, bordOriginal, bordAdouci); }
+		else if (longest == lbc) { m = (b + c) * 0.5f; uvm = (uvb + uvc) * 0.5f; nm = (nb + nc).Normalized(); SubdivTriPeau(st, a, b, m, uva, uvb, uvm, na, nb, nm, ratioMax, bordOriginal, bordAdouci); SubdivTriPeau(st, a, m, c, uva, uvm, uvc, na, nm, nc, ratioMax, bordOriginal, bordAdouci); }
+		else { m = (c + a) * 0.5f; uvm = (uvc + uva) * 0.5f; nm = (nc + na).Normalized(); SubdivTriPeau(st, a, b, m, uva, uvb, uvm, na, nb, nm, ratioMax, bordOriginal, bordAdouci); SubdivTriPeau(st, m, b, c, uvm, uvb, uvc, nm, nb, nc, ratioMax, bordOriginal, bordAdouci); }
+	}
+
+	/// <summary>Coque convexe 2D (Graham scan). Retourne les indices des points sur la coque.</summary>
+	private static List<int> ConvexHull2D(Vector2[] points)
+	{
+		if (points == null || points.Length < 3) return null;
+		int n = points.Length;
+		int leftMost = 0;
+		for (int i = 1; i < n; i++)
+			if (points[i].X < points[leftMost].X || (Mathf.Abs(points[i].X - points[leftMost].X) < 0.0001f && points[i].Y < points[leftMost].Y))
+				leftMost = i;
+		var hull = new List<int>();
+		int p = leftMost, q;
+		do
+		{
+			hull.Add(p);
+			q = (p + 1) % n;
+			for (int i = 0; i < n; i++)
+			{
+				float cross = (points[q].X - points[p].X) * (points[i].Y - points[p].Y) - (points[q].Y - points[p].Y) * (points[i].X - points[p].X);
+				if (cross < -0.0001f) q = i;
+				else if (Mathf.Abs(cross) < 0.0001f && (points[i] - points[p]).LengthSquared() > (points[q] - points[p]).LengthSquared()) q = i;
+			}
+			p = q;
+		} while (p != leftMost && hull.Count < n);
+		return hull.Count >= 3 ? hull : null;
+	}
+
+	/// <summary>Ajoute un triangle au cap (évite dégénérés).</summary>
+	private static void AjouterTriCap(SurfaceTool st, Vector3 nCap, Vector3[] cap, Func<Vector3, Vector2> UVCap, int i, int j, int k, float eps)
+	{
+		Vector3 pa = cap[i], pb = cap[j], pc = cap[k];
+		if (pa.DistanceSquaredTo(pb) < eps * eps || pb.DistanceSquaredTo(pc) < eps * eps || pc.DistanceSquaredTo(pa) < eps * eps) return;
+		float longest = Mathf.Max(pa.DistanceTo(pb), Mathf.Max(pb.DistanceTo(pc), pc.DistanceTo(pa)));
+		float shortest = Mathf.Min(pa.DistanceTo(pb), Mathf.Min(pb.DistanceTo(pc), pc.DistanceTo(pa)));
+		if (shortest < eps || longest / shortest > 2.5f) return;
+		st.SetNormal(nCap); st.SetUV(UVCap(pa)); st.AddVertex(pa);
+		st.SetNormal(nCap); st.SetUV(UVCap(pb)); st.AddVertex(pb);
+		st.SetNormal(nCap); st.SetUV(UVCap(pc)); st.AddVertex(pc);
+	}
+
+	/// <summary>Remplace un sommet par sa version adoucie/coque si c'est un point du bord (cap). Snap au plus proche si coque convexe.</summary>
+	private static Vector3 RemplacerSiBord(Vector3 p, Vector3[] bordOriginal, Vector3[] bordAdouci, float eps = 0.001f)
+	{
+		int best = -1;
+		float bestD = float.MaxValue;
+		for (int i = 0; i < bordOriginal.Length; i++)
+		{
+			float d = p.DistanceSquaredTo(bordOriginal[i]);
+			if (d < bestD) { bestD = d; best = i; }
+		}
+		if (best >= 0 && bestD < 0.00025f) return bordAdouci[best]; // snap bord (trop large → dégénérés, trop strict → trous)
+		return p;
+	}
+
+	/// <summary>Deux surfaces : peau externe (tris) + cassure (cap). UV orthogonales sur le cap + GenerateTangents sur chaque surface pour corriger l'espace tangent (plus d'étirement en étoile).</summary>
 	private static ArrayMesh ConstruireMeshMoitie(
 		List<(Vector3 a, Vector3 b, Vector3 c, Vector2 uva, Vector2 uvb, Vector2 uvc, Vector3 na, Vector3 nb, Vector3 nc)> tris,
 		List<Vector3> cap, Plane plan, float signeNormaleCap)
 	{
 		var mesh = new ArrayMesh();
 		var st = new SurfaceTool();
+
+		// Précalcul du cap adouci (peau et cap partagent le même bord)
+		Vector3[] bordOriginal = null, bordAdouci = null;
+		if (cap.Count >= 3)
+		{
+			const float eps = 0.0005f;
+			var capDedupe = new List<Vector3>();
+			foreach (Vector3 p in cap)
+			{
+				bool tropProche = false;
+				foreach (Vector3 q in capDedupe)
+					if (p.DistanceSquaredTo(q) < eps * eps) { tropProche = true; break; }
+				if (!tropProche) capDedupe.Add(p);
+			}
+			if (capDedupe.Count >= 3)
+			{
+				Vector3 centrePlan = -plan.D * plan.Normal;
+				Vector3 u = plan.Normal.Cross(Vector3.Up).Normalized();
+				if (u.LengthSquared() < 0.01f) u = plan.Normal.Cross(Vector3.Right).Normalized();
+				Vector3 v = plan.Normal.Cross(u).Normalized();
+				Vector2 centre2D = Vector2.Zero;
+				foreach (Vector3 p in capDedupe) { Vector3 d = p - centrePlan; centre2D += new Vector2(d.Dot(u), d.Dot(v)); }
+				centre2D /= capDedupe.Count;
+				var ordre = new List<int>();
+				for (int i = 0; i < capDedupe.Count; i++) ordre.Add(i);
+				ordre.Sort((i, j) => {
+					Vector3 di = capDedupe[i] - centrePlan, dj = capDedupe[j] - centrePlan;
+					return Mathf.Atan2(di.Dot(v) - centre2D.Y, di.Dot(u) - centre2D.X).CompareTo(Mathf.Atan2(dj.Dot(v) - centre2D.Y, dj.Dot(u) - centre2D.X));
+				});
+				bordOriginal = new Vector3[capDedupe.Count];
+				for (int i = 0; i < capDedupe.Count; i++) bordOriginal[i] = capDedupe[ordre[i]];
+				bordAdouci = AdoucirContourCap(bordOriginal, centrePlan, u, v, 0.4f);
+				// TOUJOURS coque convexe (4+ pts) → forme propre, plus de pointes/noires
+				if (bordAdouci.Length >= 4)
+				{
+					var pts2 = new Vector2[bordAdouci.Length];
+					for (int i = 0; i < bordAdouci.Length; i++) pts2[i] = new Vector2((bordAdouci[i] - centrePlan).Dot(u), (bordAdouci[i] - centrePlan).Dot(v));
+					var hullIdx = ConvexHull2D(pts2);
+					if (hullIdx != null && hullIdx.Count >= 3)
+					{
+						var hull3D = new Vector3[hullIdx.Count];
+						for (int hi = 0; hi < hullIdx.Count; hi++) hull3D[hi] = bordAdouci[hullIdx[hi]];
+						bordOriginal = hull3D;
+						bordAdouci = hull3D;
+					}
+				}
+			}
+		}
+
+		// 1. PEAU EXTERNE — subdivision agressive + sommets du bord adoucis (enlève les coins pointus)
+		const float ratioMaxPeau = 2.2f;
 		st.Begin(Mesh.PrimitiveType.Triangles);
 		foreach (var t in tris)
 		{
-			st.SetNormal(t.na); st.SetUV(t.uva); st.AddVertex(t.a);
-			st.SetNormal(t.nb); st.SetUV(t.uvb); st.AddVertex(t.b);
-			st.SetNormal(t.nc); st.SetUV(t.uvc); st.AddVertex(t.c);
+			Vector3 a = bordAdouci != null ? RemplacerSiBord(t.a, bordOriginal, bordAdouci) : t.a;
+			Vector3 b = bordAdouci != null ? RemplacerSiBord(t.b, bordOriginal, bordAdouci) : t.b;
+			Vector3 c = bordAdouci != null ? RemplacerSiBord(t.c, bordOriginal, bordAdouci) : t.c;
+			float lab = a.DistanceTo(b), lbc = b.DistanceTo(c), lca = c.DistanceTo(a);
+			float longest = Mathf.Max(lab, Mathf.Max(lbc, lca));
+			float shortest = Mathf.Min(lab, Mathf.Min(lbc, lca));
+			if (shortest < 0.0005f || longest / shortest <= ratioMaxPeau)
+			{
+				if (a.DistanceSquaredTo(b) >= 0.000001f && b.DistanceSquaredTo(c) >= 0.000001f && c.DistanceSquaredTo(a) >= 0.000001f)
+				{
+					st.SetNormal(t.na); st.SetUV(t.uva); st.AddVertex(a);
+					st.SetNormal(t.nb); st.SetUV(t.uvb); st.AddVertex(b);
+					st.SetNormal(t.nc); st.SetUV(t.uvc); st.AddVertex(c);
+				}
+			}
+			else
+			{
+				Vector3 m; Vector2 uvm; Vector3 nm;
+				if (longest == lab) { m = (a + b) * 0.5f; uvm = (t.uva + t.uvb) * 0.5f; nm = (t.na + t.nb).Normalized(); SubdivTriPeau(st, a, m, c, t.uva, uvm, t.uvc, t.na, nm, t.nc, ratioMaxPeau, bordOriginal, bordAdouci); SubdivTriPeau(st, m, b, c, uvm, t.uvb, t.uvc, nm, t.nb, t.nc, ratioMaxPeau, bordOriginal, bordAdouci); }
+				else if (longest == lbc) { m = (b + c) * 0.5f; uvm = (t.uvb + t.uvc) * 0.5f; nm = (t.nb + t.nc).Normalized(); SubdivTriPeau(st, a, b, m, t.uva, t.uvb, uvm, t.na, t.nb, nm, ratioMaxPeau, bordOriginal, bordAdouci); SubdivTriPeau(st, a, m, c, t.uva, uvm, t.uvc, t.na, nm, t.nc, ratioMaxPeau, bordOriginal, bordAdouci); }
+				else { m = (c + a) * 0.5f; uvm = (t.uvc + t.uva) * 0.5f; nm = (t.nc + t.na).Normalized(); SubdivTriPeau(st, a, b, m, t.uva, t.uvb, uvm, t.na, t.nb, nm, ratioMaxPeau, bordOriginal, bordAdouci); SubdivTriPeau(st, m, b, c, uvm, t.uvb, t.uvc, nm, t.nb, t.nc, ratioMaxPeau, bordOriginal, bordAdouci); }
+			}
 		}
+		st.GenerateTangents();
 		mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, st.CommitToArrays());
 
+		// 2. CASSURE (CAP) — utilise le bord adouci précalculé (ou recalcule si pas de précalc)
 		if (cap.Count >= 3)
 		{
+			const float eps = 0.0005f;
+			Vector3[] capOrdre;
 			Vector3 centrePlan = -plan.D * plan.Normal;
 			Vector3 u = plan.Normal.Cross(Vector3.Up).Normalized();
 			if (u.LengthSquared() < 0.01f) u = plan.Normal.Cross(Vector3.Right).Normalized();
 			Vector3 v = plan.Normal.Cross(u).Normalized();
-			Vector2 centre2D = Vector2.Zero;
-			foreach (Vector3 p in cap) { Vector3 d = p - centrePlan; centre2D += new Vector2(d.Dot(u), d.Dot(v)); }
-			centre2D /= cap.Count;
-			var ordre = new List<int>();
-			for (int i = 0; i < cap.Count; i++) ordre.Add(i);
-			ordre.Sort((i, j) => {
-				Vector3 di = cap[i] - centrePlan, dj = cap[j] - centrePlan;
-				float ai = Mathf.Atan2(di.Dot(v) - centre2D.Y, di.Dot(u) - centre2D.X);
-				float aj = Mathf.Atan2(dj.Dot(v) - centre2D.Y, dj.Dot(u) - centre2D.X);
-				return ai.CompareTo(aj);
-			});
-			var capOrdre = new Vector3[cap.Count];
-			for (int i = 0; i < cap.Count; i++) capOrdre[i] = cap[ordre[i]];
-			var pts2D = new Vector2[capOrdre.Length];
-			for (int i = 0; i < capOrdre.Length; i++) { Vector3 d = capOrdre[i] - centrePlan; pts2D[i] = new Vector2(d.Dot(u), d.Dot(v)); }
-			int[] ind = Geometry2D.TriangulatePolygon(pts2D);
+			if (bordAdouci != null && bordAdouci.Length >= 3)
+				capOrdre = bordAdouci;
+			else
+			{
+				var capDedupe = new List<Vector3>();
+				foreach (Vector3 p in cap)
+				{
+					bool tropProche = false;
+					foreach (Vector3 q in capDedupe)
+						if (p.DistanceSquaredTo(q) < eps * eps) { tropProche = true; break; }
+					if (!tropProche) capDedupe.Add(p);
+				}
+				if (capDedupe.Count < 3) capDedupe = new List<Vector3>(cap);
+				Vector2 centre2D = Vector2.Zero;
+				foreach (Vector3 p in capDedupe) { Vector3 d = p - centrePlan; centre2D += new Vector2(d.Dot(u), d.Dot(v)); }
+				centre2D /= capDedupe.Count;
+				var ordre = new List<int>();
+				for (int i = 0; i < capDedupe.Count; i++) ordre.Add(i);
+				ordre.Sort((i, j) => {
+					Vector3 di = capDedupe[i] - centrePlan, dj = capDedupe[j] - centrePlan;
+					return Mathf.Atan2(di.Dot(v) - centre2D.Y, di.Dot(u) - centre2D.X).CompareTo(Mathf.Atan2(dj.Dot(v) - centre2D.Y, dj.Dot(u) - centre2D.X));
+				});
+				capOrdre = new Vector3[capDedupe.Count];
+				for (int i = 0; i < capDedupe.Count; i++) capOrdre[i] = capDedupe[ordre[i]];
+				capOrdre = AdoucirContourCap(capOrdre, centrePlan, u, v, 0.35f);
+			}
+			// Pas d'enrichissement : coque convexe = forme simple, évite triangles fins → pointes noires
+
+			// CRÉATION DU CAP — UV normalisées [0,1] + projection orthogonale + filtrer triangles fins (réaliste)
 			Vector3 nCap = plan.Normal * signeNormaleCap;
+			Vector3 axeU = nCap.Cross(Vector3.Up).Normalized();
+			if (axeU.LengthSquared() < 0.01f) axeU = nCap.Cross(Vector3.Right).Normalized();
+			Vector3 axeV = nCap.Cross(axeU).Normalized();
+			// UV [0,1] pour tangentes propres (évite singularités → pointes noires)
+			float minU = float.MaxValue, maxU = float.MinValue, minV = float.MaxValue, maxV = float.MinValue;
+			foreach (Vector3 p in capOrdre) { float pu = p.Dot(axeU), pv = p.Dot(axeV); if (pu < minU) minU = pu; if (pu > maxU) maxU = pu; if (pv < minV) minV = pv; if (pv > maxV) maxV = pv; }
+			float rU = Mathf.Max(0.001f, maxU - minU), rV = Mathf.Max(0.001f, maxV - minV);
+			Vector2 UVCap(Vector3 p) => new Vector2(Mathf.Clamp((p.Dot(axeU) - minU) / rU, 0f, 1f), Mathf.Clamp((p.Dot(axeV) - minV) / rV, 0f, 1f));
+
+			// Triangulation SANS éventail (évite singularité UV → texture en pointe/étoile)
+			int n = capOrdre.Length;
 			st.Clear();
 			st.Begin(Mesh.PrimitiveType.Triangles);
-			if (ind != null && ind.Length >= 3)
-				for (int t = 0; t + 2 < ind.Length; t += 3)
-				{
-					Vector3 pa = capOrdre[ind[t]], pb = capOrdre[ind[t + 1]], pc = capOrdre[ind[t + 2]];
-					st.SetNormal(nCap); st.SetUV(new Vector2(0.5f, 0.5f)); st.AddVertex(pa);
-					st.SetNormal(nCap); st.SetUV(new Vector2(0.5f, 0.5f)); st.AddVertex(pb);
-					st.SetNormal(nCap); st.SetUV(new Vector2(0.5f, 0.5f)); st.AddVertex(pc);
-				}
+			if (n == 3)
+				AjouterTriCap(st, nCap, capOrdre, UVCap, 0, 1, 2, eps);
+			else if (n == 4)
+			{
+				AjouterTriCap(st, nCap, capOrdre, UVCap, 0, 1, 2, eps);
+				AjouterTriCap(st, nCap, capOrdre, UVCap, 0, 2, 3, eps);
+			}
+			else if (n == 5)
+			{
+				AjouterTriCap(st, nCap, capOrdre, UVCap, 0, 1, 2, eps);
+				AjouterTriCap(st, nCap, capOrdre, UVCap, 0, 2, 4, eps);
+				AjouterTriCap(st, nCap, capOrdre, UVCap, 2, 3, 4, eps);
+			}
+			else if (n >= 6)
+			{
+				int c = n / 2; // (0,c,n-1) central + régions (0..c) et (c..n-1)
+				AjouterTriCap(st, nCap, capOrdre, UVCap, 0, c, n - 1, eps);
+				for (int i = 1; i < c; i++) AjouterTriCap(st, nCap, capOrdre, UVCap, 0, i, i + 1, eps);
+				for (int i = c + 1; i < n - 1; i++) AjouterTriCap(st, nCap, capOrdre, UVCap, c, i, i + 1, eps);
+			}
+			st.GenerateTangents(); // OBLIGATOIRE POUR LE TRIPLANAR NORMAL MAP
 			mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, st.CommitToArrays());
 		}
 		return mesh;
 	}
 
-	private static StandardMaterial3D _matCapTransparent;
-	private static StandardMaterial3D _matCapNoir;
-	private static StandardMaterial3D MatCapTransparent()
-	{
-		if (_matCapTransparent != null) return _matCapTransparent;
-		_matCapTransparent = new StandardMaterial3D();
-		_matCapTransparent.Transparency = BaseMaterial3D.TransparencyEnum.Alpha;
-		_matCapTransparent.AlbedoColor = new Color(1, 1, 1, 0f);
-		_matCapTransparent.CullMode = BaseMaterial3D.CullModeEnum.Disabled;
-		return _matCapTransparent;
-	}
-	private static StandardMaterial3D MatCapNoir()
-	{
-		if (_matCapNoir != null) return _matCapNoir;
-		_matCapNoir = new StandardMaterial3D();
-		_matCapNoir.AlbedoColor = new Color(0.05f, 0.05f, 0.05f);
-		_matCapNoir.Roughness = 1f;
-		return _matCapNoir;
-	}
-
-	/// <summary>Spawn une moitié de roche (modèle temporaire). Matériaux déjà assignés par surface sur le mesh (roche + cap transparent/noir).</summary>
+	/// <summary>Spawn une moitié de roche (modèle temporaire). Un seul MaterialOverride procédural (compat inventaire).</summary>
 	private void SpawnMoitieRoche(ArrayMesh meshMoitie, Vector3 positionInitiale, Vector3 directionImpulsion, float nouvelleMasse)
 	{
-		Shape3D shape = meshMoitie.CreateConvexShape(true, false);
+		Shape3D shape = CreerShapeCollisionConvexeRobuste(meshMoitie);
 		if (shape == null) shape = new BoxShape3D { Size = new Vector3(0.08f, 0.08f, 0.08f) };
 		ItemPhysique moitie = new ItemPhysique();
 		moitie.EstUnEclat = true;
 		moitie.EstEclatFracture = true;
+		moitie.NiveauFracture = NiveauFracture + 1;
 		moitie.ID_Objet = ID_Objet;
 		moitie.IndexChimique = IndexChimique;
 		moitie.Mass = nouvelleMasse;
 		int idxCh = Mathf.Clamp(IndexChimique, 0, TableGeologique.Length - 1);
 		moitie.ResistanceActuelle = TableGeologique[idxCh].ResistanceFuture * (nouvelleMasse / 50f);
 		moitie.ContinuousCd = true;
-		moitie.Scale = Scale;
+		moitie.Scale = Vector3.One; // Atomes cuits dans le mesh, conteneur à 1,1,1
 
 		MeshInstance3D visuel = new MeshInstance3D();
 		visuel.Name = "MeshInstance3D";
 		visuel.Mesh = meshMoitie;
 		visuel.CastShadow = GeometryInstance3D.ShadowCastingSetting.On;
+		// Matériau procédural pour morceaux fracturés : triplanar MONDE (texture cohérente, plus de surfaces noires/blanches unies), très mat.
+		StandardMaterial3D matMoitie = (StandardMaterial3D)CreerMaterielProcedural(ID_Objet == 11, IndexChimique, pourEclat: false).Duplicate(true);
+		matMoitie.CullMode = BaseMaterial3D.CullModeEnum.Disabled;
+		matMoitie.Roughness = 0.95f;
+		matMoitie.NormalEnabled = false;
+		matMoitie.Uv1Triplanar = true;
+		matMoitie.Uv1WorldTriplanar = true;   // Monde = texture basée sur position globale → variation naturelle, pas de facettes unies
+		matMoitie.Uv1Scale = new Vector3(1.2f, 1.2f, 1.2f);
+		visuel.MaterialOverride = matMoitie;
 		moitie.AddChild(visuel);
 
 		CollisionShape3D hitbox = new CollisionShape3D();
@@ -438,7 +736,7 @@ public partial class ItemPhysique : RigidBody3D
 		hitbox.Shape = shape;
 		moitie.AddChild(hitbox);
 
-		if (moitie.ID_Objet != 11) { moitie.ContactMonitor = true; moitie.MaxContactsReported = 1; moitie.BodyEntered += moitie.SurImpactPhysique; }
+		if (moitie.ID_Objet != 11) { moitie.ContactMonitor = true; moitie.MaxContactsReported = 1; moitie.BodyEntered += moitie.SurImpactPhysique; moitie._surImpactConnecte = true; }
 		moitie.Name = "ItemPhysique";
 		moitie.AddToGroup("BlocsPoses");
 		moitie.SetMeta("ID_Matiere", moitie.ID_Objet);
@@ -481,6 +779,45 @@ public partial class ItemPhysique : RigidBody3D
 		return result;
 	}
 
+	/// <summary>Adoucit le contour d'un éclat vers une forme plus régulière (enlève les coins pointus).</summary>
+	private static Vector3[] AdoucirContourEclat(Vector3[] points, Vector3 centre, Vector3 u, Vector3 v, float force)
+	{
+		if (points == null || points.Length < 4 || force <= 0f) return points;
+		float rayonMoyen = 0f;
+		foreach (Vector3 p in points) rayonMoyen += (p - centre).Length();
+		rayonMoyen /= points.Length;
+		if (rayonMoyen < 0.001f) return points;
+		var result = new Vector3[points.Length];
+		for (int i = 0; i < points.Length; i++)
+		{
+			Vector3 d = points[i] - centre;
+			float angle = Mathf.Atan2(d.Dot(v), d.Dot(u));
+			Vector3 ptRegulier = centre + (float)Mathf.Cos(angle) * rayonMoyen * u + (float)Mathf.Sin(angle) * rayonMoyen * v;
+			result[i] = points[i].Lerp(ptRegulier, force);
+		}
+		return result;
+	}
+
+	/// <summary>Insère des points sur les arêtes trop longues d'un polygone (évite triangles allongés).</summary>
+	private static Vector3[] EnrichirContourPolygone(Vector3[] points, float maxLongueurArete)
+	{
+		if (points == null || points.Length < 3) return points;
+		var enrichi = new List<Vector3>();
+		for (int i = 0; i < points.Length; i++)
+		{
+			enrichi.Add(points[i]);
+			Vector3 next = points[(i + 1) % points.Length];
+			float dist = points[i].DistanceTo(next);
+			if (dist > maxLongueurArete)
+			{
+				int nSeg = Mathf.Max(1, (int)(dist / maxLongueurArete));
+				for (int s = 1; s < nSeg; s++)
+					enrichi.Add(points[i].Lerp(next, (float)s / nSeg));
+			}
+		}
+		return enrichi.Count > points.Length ? enrichi.ToArray() : points;
+	}
+
 	/// <summary>Quatre points d'un petit quad d'un côté du plan (fallback, plan = cassure passant par l'impact).</summary>
 	private static Vector3[] PointsFallbackFragment(Plane plan, int cote)
 	{
@@ -500,8 +837,29 @@ public partial class ItemPhysique : RigidBody3D
 	{
 		if (pointsFragment == null || pointsFragment.Length < 4) return;
 
-		// Centre et base UV = plan de cassure (texture alignée sur les angles du fragment)
+		// Centre et repère pour adoucissement
 		Vector3 centre = Vector3.Zero;
+		foreach (Vector3 p in pointsFragment) centre += p;
+		centre /= pointsFragment.Length;
+		var normalAcc = Vector3.Zero;
+		for (int i = 0; i < pointsFragment.Length; i++)
+		{
+			Vector3 v1 = pointsFragment[i], v2 = pointsFragment[(i + 1) % pointsFragment.Length];
+			normalAcc += (v1 - centre).Cross(v2 - centre);
+		}
+		if (normalAcc.LengthSquared() > 0.0001f)
+		{
+			Vector3 nPlan = normalAcc.Normalized();
+			Vector3 tU = nPlan.Cross(Vector3.Up).Normalized();
+			if (tU.LengthSquared() < 0.01f) tU = nPlan.Cross(Vector3.Right).Normalized();
+			Vector3 tV = nPlan.Cross(tU).Normalized();
+			pointsFragment = AdoucirContourEclat(pointsFragment, centre, tU, tV, 0.3f);
+		}
+		// Enrichir le contour : arêtes longues → points intermédiaires (évite étirement/rayons sur faces)
+		pointsFragment = EnrichirContourPolygone(pointsFragment, 0.012f);
+
+		// Recalcul centre après enrichissement
+		centre = Vector3.Zero;
 		foreach (Vector3 p in pointsFragment) centre += p;
 		centre /= pointsFragment.Length;
 
@@ -539,18 +897,44 @@ public partial class ItemPhysique : RigidBody3D
 		for (int i = 0; i < n; i++)
 			pointsArriere[i] = pointsFragment[i] - normalPlan * epaisseur;
 
+		// UV normalisées [0,1] avec repère global (tangentU, tangentV) → texture cohérente, plus de faces noires.
+		float minU = float.MaxValue, maxU = float.MinValue, minV = float.MaxValue, maxV = float.MinValue;
+		foreach (Vector3 p in pointsFragment)
+		{
+			Vector3 d = p - centre;
+			float pu = d.Dot(tangentU), pv = d.Dot(tangentV);
+			if (pu < minU) minU = pu; if (pu > maxU) maxU = pu;
+			if (pv < minV) minV = pv; if (pv > maxV) maxV = pv;
+		}
+		foreach (Vector3 p in pointsArriere)
+		{
+			Vector3 d = p - centre;
+			float pu = d.Dot(tangentU), pv = d.Dot(tangentV);
+			if (pu < minU) minU = pu; if (pu > maxU) maxU = pu;
+			if (pv < minV) minV = pv; if (pv > maxV) maxV = pv;
+		}
+		float rangeU = Mathf.Max(0.001f, maxU - minU), rangeV = Mathf.Max(0.001f, maxV - minV);
+		Vector2 UVNorm(Vector3 pt)
+		{
+			Vector3 d = pt - centre;
+			float pu = (d.Dot(tangentU) - minU) / rangeU, pv = (d.Dot(tangentV) - minV) / rangeV;
+			return new Vector2(Mathf.Clamp(pu, 0f, 1f), Mathf.Clamp(pv, 0f, 1f));
+		}
+
 		var st = new SurfaceTool();
 		st.Begin(Mesh.PrimitiveType.Triangles);
+		bool aDesSommetsAvecUV = false;
 
-		void AddTri(Vector3 a, Vector3 b, Vector3 c, Vector3 norm, Vector3 cen)
+		void AddTri(Vector3 a, Vector3 b, Vector3 c, Vector3 norm)
 		{
 			Vector3 cr = (b - a).Cross(c - a);
 			if (cr.LengthSquared() < 0.0001f) return;
 			Vector3 n = cr.Normalized();
 			if (Mathf.Abs(n.Dot(normaleDeCoupe)) > 0.9f) n = normalPlan * Mathf.Sign(n.Dot(normalPlan));
-			st.SetUV(UVPlanCassure(cen, a, normalPlan, tangentU, tangentV, scaleUV)); st.SetNormal(n); st.AddVertex(a);
-			st.SetUV(UVPlanCassure(cen, b, normalPlan, tangentU, tangentV, scaleUV)); st.SetNormal(n); st.AddVertex(b);
-			st.SetUV(UVPlanCassure(cen, c, normalPlan, tangentU, tangentV, scaleUV)); st.SetNormal(n); st.AddVertex(c);
+			st.SetNormal(n); st.SetUV(UVNorm(a)); st.AddVertex(a);
+			st.SetNormal(n); st.SetUV(UVNorm(b)); st.AddVertex(b);
+			st.SetNormal(n); st.SetUV(UVNorm(c)); st.AddVertex(c);
+			aDesSommetsAvecUV = true;
 		}
 
 		if (indices != null && indices.Length >= 3)
@@ -559,13 +943,13 @@ public partial class ItemPhysique : RigidBody3D
 			for (int t = 0; t + 2 < indices.Length; t += 3)
 			{
 				int i0 = indices[t], i1 = indices[t + 1], i2 = indices[t + 2];
-				AddTri(pointsFragment[i0], pointsFragment[i1], pointsFragment[i2], normalPlan, centre);
+				AddTri(pointsFragment[i0], pointsFragment[i1], pointsFragment[i2], normalPlan);
 			}
 			// Face arrière (sens inverse pour que la normale pointe vers l'extérieur)
 			for (int t = 0; t + 2 < indices.Length; t += 3)
 			{
 				int i0 = indices[t], i1 = indices[t + 1], i2 = indices[t + 2];
-				AddTri(pointsArriere[i0], pointsArriere[i2], pointsArriere[i1], -normalPlan, centre);
+				AddTri(pointsArriere[i0], pointsArriere[i2], pointsArriere[i1], -normalPlan);
 			}
 			// Bords (quads entre face avant et arrière) = tranche du caillou
 			for (int i = 0; i < n; i++)
@@ -573,8 +957,8 @@ public partial class ItemPhysique : RigidBody3D
 				int j = (i + 1) % n;
 				Vector3 nBord = (pointsFragment[j] - pointsFragment[i]).Cross(pointsArriere[i] - pointsFragment[i]).Normalized();
 				if (nBord.LengthSquared() < 0.01f) continue;
-				AddTri(pointsFragment[i], pointsFragment[j], pointsArriere[j], nBord, centre);
-				AddTri(pointsFragment[i], pointsArriere[j], pointsArriere[i], nBord, centre);
+				AddTri(pointsFragment[i], pointsFragment[j], pointsArriere[j], nBord);
+				AddTri(pointsFragment[i], pointsArriere[j], pointsArriere[i], nBord);
 			}
 		}
 		else
@@ -585,12 +969,15 @@ public partial class ItemPhysique : RigidBody3D
 				Vector3 v0 = centre, v1 = pointsFragment[i], v2 = pointsFragment[(i + 1) % n];
 				Vector3 cAr = centre - normalPlan * epaisseur;
 				Vector3 ar1 = pointsArriere[i], ar2 = pointsArriere[(i + 1) % n];
-				AddTri(v0, v1, v2, normalPlan, centre);
-				AddTri(cAr, ar2, ar1, -normalPlan, cAr);
-				AddTri(v1, v2, ar2, (v2 - v1).Cross(ar1 - v1).Normalized(), centre);
-				AddTri(v1, ar2, ar1, (v2 - v1).Cross(ar1 - v1).Normalized(), centre);
+				AddTri(v0, v1, v2, normalPlan);
+				AddTri(cAr, ar2, ar1, -normalPlan);
+				AddTri(v1, v2, ar2, (v2 - v1).Cross(ar1 - v1).Normalized());
+				AddTri(v1, ar2, ar1, (v2 - v1).Cross(ar1 - v1).Normalized());
 			}
 		}
+		// GenerateTangents exige des UV ; ne l'appeler que si au moins un triangle a été ajouté (avec SetUV).
+		if (aDesSommetsAvecUV)
+			st.GenerateTangents();
 		ArrayMesh meshFragment = st.Commit();
 		// Fallback : si la triangulation n'a rien donné, mesh minimal pour que le fragment apparaisse à l'écran
 		if (meshFragment.GetFaces().Length == 0)
@@ -599,6 +986,7 @@ public partial class ItemPhysique : RigidBody3D
 		ItemPhysique eclat = new ItemPhysique();
 		eclat.EstUnEclat = true;
 		eclat.EstEclatFracture = true;
+		eclat.NiveauFracture = NiveauFracture + 1;
 		eclat.ID_Objet = ID_Objet;
 		eclat.IndexChimique = IndexChimique;
 		eclat.Mass = nouvelleMasse;
@@ -607,16 +995,27 @@ public partial class ItemPhysique : RigidBody3D
 		eclat.ContinuousCd = true;
 
 		bool estSilex = (ID_Objet == 11);
-		Shape3D shapeCollision = meshFragment.CreateConvexShape(true, false);
+		Shape3D shapeCollision = CreerShapeCollisionConvexeRobuste(meshFragment);
 		if (shapeCollision == null)
 			shapeCollision = new BoxShape3D { Size = new Vector3(0.08f, 0.08f, 0.08f) };
-		eclat.Scale = Scale;
+		eclat.Scale = Vector3.One; // Sommets déjà cuits (scale dans les points), plus d'accordéon UV
 
 		MeshInstance3D visuel = new MeshInstance3D();
 		visuel.Name = "MeshInstance3D";
 		visuel.Mesh = meshFragment;
 		visuel.CastShadow = GeometryInstance3D.ShadowCastingSetting.On;
-		visuel.MaterialOverride = CreerMaterielProcedural(estSilex, IndexChimique, pourEclat: true);
+		// Matériau harmonisé avec moitiés : triplanar MONDE (plus de facettes noires/blanches), UV normalisées.
+		StandardMaterial3D materielBase = CreerMaterielProcedural(estSilex, IndexChimique, pourEclat: false);
+		StandardMaterial3D materiel = (StandardMaterial3D)materielBase.Duplicate(true);
+		materiel.CullMode = BaseMaterial3D.CullModeEnum.Disabled;
+		materiel.Roughness = 0.95f;
+		materiel.NormalEnabled = false;
+		materiel.Uv1Triplanar = true;
+		materiel.Uv1WorldTriplanar = true;
+		materiel.Uv1Scale = new Vector3(1.2f, 1.2f, 1.2f);
+		if (meshFragment.GetSurfaceCount() > 0)
+			meshFragment.SurfaceSetMaterial(0, materiel);
+		visuel.MaterialOverride = materiel;
 		eclat.AddChild(visuel);
 
 		CollisionShape3D hitbox = new CollisionShape3D();
@@ -629,6 +1028,7 @@ public partial class ItemPhysique : RigidBody3D
 			eclat.ContactMonitor = true;
 			eclat.MaxContactsReported = 1;
 			eclat.BodyEntered += eclat.SurImpactPhysique;
+			eclat._surImpactConnecte = true;
 		}
 		eclat.Name = "ItemPhysique";
 		eclat.AddToGroup("BlocsPoses");
@@ -643,16 +1043,41 @@ public partial class ItemPhysique : RigidBody3D
 		GetParent().AddChild(eclat);
 	}
 
-	/// <summary>Applique position et impulsion une fois l'éclat dans l'arbre (fragment bien visible à l'écran).</summary>
+	/// <summary>Applique position et impulsion une fois l'éclat dans l'arbre (fragment bien visible à l'écran). Force la mise à jour du matériau pour que la texture roche s'affiche.</summary>
 	private static void AppliquerSpawnEclat(ItemPhysique eclat)
 	{
 		if (!eclat.HasMeta("spawn_pos")) return;
-		eclat.GlobalPosition = (Vector3)eclat.GetMeta("spawn_pos");
+		Vector3 pos = (Vector3)eclat.GetMeta("spawn_pos");
+		// Éviter que les fragments passent sous la map : plancher minimal en Y
+		const float YMinSpawn = 0.5f;
+		if (pos.Y < YMinSpawn) pos.Y = YMinSpawn;
+		eclat.GlobalPosition = pos;
 		eclat.RemoveMeta("spawn_pos");
 		if (eclat.HasMeta("spawn_impulse"))
 		{
 			eclat.ApplyCentralImpulse((Vector3)eclat.GetMeta("spawn_impulse"));
 			eclat.RemoveMeta("spawn_impulse");
+		}
+		// Forcer la mise à jour du matériau (évite fragment/moitié gris ou texture qui ne se met pas à jour)
+		foreach (Node child in eclat.GetChildren())
+		{
+			if (child is MeshInstance3D mi)
+			{
+				if (mi.MaterialOverride is StandardMaterial3D matOverride)
+				{
+					mi.MaterialOverride = matOverride;
+					if (mi.Mesh is ArrayMesh arr && arr.GetSurfaceCount() > 0 && arr.SurfaceGetMaterial(0) != matOverride)
+						arr.SurfaceSetMaterial(0, matOverride);
+				}
+				else if (mi.Mesh is ArrayMesh arr2 && arr2.GetSurfaceCount() > 0)
+				{
+					// Moitié : reforcer l'override à l'entrée dans l'arbre (au cas où le rendu n'avait pas encore pris en compte)
+					Material matSurf = arr2.SurfaceGetMaterial(0);
+					if (matSurf != null)
+						mi.MaterialOverride = (Material)matSurf.Duplicate(true);
+				}
+				break;
+			}
 		}
 	}
 
@@ -810,10 +1235,10 @@ public partial class ItemPhysique : RigidBody3D
 		materiel.NormalTexture = textureRelief;
 		if (!pourEclat)
 		{
-			// Triplanar en espace objet (évite étirement quand la roche roule) + scale pour casser la grille
+			// Triplanar en espace objet (évite étirement, masque défauts UV plan de coupe) — vital pour objets physiques et inventaire
 			materiel.Uv1Triplanar = true;
-			materiel.Uv1WorldTriplanar = false; // INTERDIT SUR LES OBJETS PHYSIQUES
-			materiel.Uv1Scale = new Vector3(0.4f, 0.4f, 0.4f); // Évite l'effet de grille dense
+			materiel.Uv1WorldTriplanar = false;
+			materiel.Uv1Scale = new Vector3(0.5f, 0.5f, 0.5f);
 			materiel.Uv1TriplanarSharpness = 2.0f;
 		}
 		// Pour les éclats : pas de triplanar, UV planaire sur la cassure (réduit quadrillage)
@@ -844,6 +1269,30 @@ public partial class ItemPhysique : RigidBody3D
 		return new Vector2(u, v);
 	}
 
+	/// <summary>Crée une shape de collision convexe sans faire échouer Jolt (trop de sommets / triangles trop petits). Fallback = box depuis AABB.</summary>
+	private static Shape3D CreerShapeCollisionConvexeRobuste(ArrayMesh mesh)
+	{
+		if (mesh == null) return new BoxShape3D { Size = Vector3.One * 0.2f };
+		Vector3[] faces = mesh.GetFaces();
+		// Jolt : "Could not find a suitable initial triangle because its area was too small" si mesh trop détaillé ou dégénéré
+		const int maxSommetsPourConvexe = 1024; // 12×8 sphère ≈ 576, garde une marge
+		if (faces != null && faces.Length <= maxSommetsPourConvexe)
+		{
+			try
+			{
+				Shape3D shape = mesh.CreateConvexShape(true, false);
+				if (shape != null) return shape;
+			}
+			catch { /* fallback */ }
+		}
+		Aabb aabb = mesh.GetAabb();
+		Vector3 size = aabb.Size;
+		if (size.X < 0.01f) size.X = 0.1f;
+		if (size.Y < 0.01f) size.Y = 0.1f;
+		if (size.Z < 0.01f) size.Z = 0.1f;
+		return new BoxShape3D { Size = size };
+	}
+
 	/// <summary>UV en projection planaire sur la surface de cassure : la texture suit les angles du fragment.</summary>
 	private static Vector2 UVPlanCassure(Vector3 centre, Vector3 point, Vector3 normalPlan, Vector3 tangentU, Vector3 tangentV, float scaleUV)
 	{
@@ -858,16 +1307,17 @@ public partial class ItemPhysique : RigidBody3D
 		ArrayMesh arrayMesh;
 		float forceDeformation;
 
+		// Sphère peu détaillée pour que Jolt accepte la shape convexe (évite "initial triangle area too small" avec 1988 sommets)
 		if (estSilex)
 		{
-			var primitive = new SphereMesh { Radius = 0.12f, Height = 0.24f }; // Forme de base sphère (déformation inchangée)
+			var primitive = new SphereMesh { Radius = 0.12f, Height = 0.24f, RadialSegments = 12, Rings = 8 };
 			arrayMesh = new ArrayMesh();
 			arrayMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, primitive.GetMeshArrays());
 			forceDeformation = 0.3f;
 		}
 		else
 		{
-			var primitive = new SphereMesh { Radius = 0.15f, Height = 0.3f };
+			var primitive = new SphereMesh { Radius = 0.15f, Height = 0.3f, RadialSegments = 12, Rings = 8 };
 			arrayMesh = new ArrayMesh();
 			arrayMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, primitive.GetMeshArrays());
 			forceDeformation = 0.15f;
@@ -935,8 +1385,8 @@ public partial class ItemPhysique : RigidBody3D
 		var nouveauMesh = new ArrayMesh();
 		mdt.CommitToSurface(nouveauMesh);
 
-		// Caillou ET Silex : hitbox convexe précise qui épouse les bosses (dormance physique désirée)
-		Shape3D nouvelleCollision = nouveauMesh.CreateConvexShape(true, false);
+		// Hitbox convexe ; Jolt échoue si trop de sommets ou triangles trop petits ("initial triangle area too small")
+		Shape3D nouvelleCollision = CreerShapeCollisionConvexeRobuste(nouveauMesh);
 
 		if (estSilex)
 		{

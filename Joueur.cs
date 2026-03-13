@@ -11,6 +11,8 @@ public struct SlotInventaire
     public bool EstUnEclat;
     /// <summary>Mesh sauvegardé pour les éclats (sinon null).</summary>
     public Mesh MeshEclat;
+    /// <summary>Nombre de fractures subies (0 = intact). Conservé au ramassage/lancer pour poudre au-delà de 5.</summary>
+    public int NiveauFracture;
     public bool EstVide => ID == 0;
 }
 
@@ -369,7 +371,8 @@ public partial class Joueur : CharacterBody3D
                 IndexMorphologique = item?.IndexCacheMemoire ?? 0,
                 IndexChimique = item?.IndexChimique ?? 0,
                 EstUnEclat = item?.EstUnEclat ?? false,
-                MeshEclat = (item != null && item.EstUnEclat) ? item.ObtenirMeshVisuel() : null
+                MeshEclat = (item != null && item.EstUnEclat) ? item.ObtenirMeshVisuel() : null,
+                NiveauFracture = item?.NiveauFracture ?? 0
             };
         }
         else if (objetTouche is RigidBody3D rb)
@@ -405,7 +408,8 @@ public partial class Joueur : CharacterBody3D
                 IndexMorphologique = item.IndexCacheMemoire,
                 IndexChimique = item.IndexChimique,
                 EstUnEclat = item.EstUnEclat,
-                MeshEclat = item.EstUnEclat ? item.ObtenirMeshVisuel() : null
+                MeshEclat = item.EstUnEclat ? item.ObtenirMeshVisuel() : null,
+                NiveauFracture = item.NiveauFracture
             };
         }
         else
@@ -544,6 +548,7 @@ public partial class Joueur : CharacterBody3D
                 ID_Objet = mainActive.ID,
                 IndexChimique = mainActive.IndexChimique,
                 EstUnEclat = true,
+                NiveauFracture = mainActive.NiveauFracture,
                 Name = "ItemPhysique"
             };
             item.AddChild(new MeshInstance3D { Name = "MeshInstance3D", Mesh = mainActive.MeshEclat });
@@ -554,14 +559,14 @@ public partial class Joueur : CharacterBody3D
         {
             float rayon = id == 10 ? 0.15f : 0.25f;
             float hauteur = rayon * 2f;
-            var item = new ItemPhysique { ID_Objet = id, IndexCacheMemoire = mainActive.IndexMorphologique, IndexChimique = mainActive.IndexChimique, Name = "ItemPhysique" };
+            var item = new ItemPhysique { ID_Objet = id, IndexCacheMemoire = mainActive.IndexMorphologique, IndexChimique = mainActive.IndexChimique, NiveauFracture = mainActive.NiveauFracture, Name = "ItemPhysique" };
             item.AddChild(new MeshInstance3D { Mesh = new SphereMesh { Radius = rayon, Height = hauteur } });
             item.AddChild(new CollisionShape3D { Shape = new SphereShape3D { Radius = rayon } });
             corps = item;
         }
         else if (id == 11) // Silex (ItemPhysique = RigidBody3D, l'eau gère le ralentissement)
         {
-            var item = new ItemPhysique { ID_Objet = id, IndexCacheMemoire = mainActive.IndexMorphologique, IndexChimique = mainActive.IndexChimique, Name = "ItemPhysique" };
+            var item = new ItemPhysique { ID_Objet = id, IndexCacheMemoire = mainActive.IndexMorphologique, IndexChimique = mainActive.IndexChimique, NiveauFracture = mainActive.NiveauFracture, Name = "ItemPhysique" };
             item.AddChild(new MeshInstance3D { Mesh = new PrismMesh { Size = new Vector3(0.2f, 0.15f, 0.25f) } });
             item.AddChild(new CollisionShape3D { Shape = new BoxShape3D { Size = new Vector3(0.2f, 0.15f, 0.25f) } });
             corps = item;
