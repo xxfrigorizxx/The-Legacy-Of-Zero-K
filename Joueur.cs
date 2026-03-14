@@ -1,6 +1,18 @@
 using Godot;
 using System;
 
+/// <summary>Propriétés d'une matière flexible (herbe, liane, boyau, racine traitée...). Comme TableGeologique mais pour les fibres.</summary>
+public struct ProfilMatiereFlexible
+{
+    public string Nom;
+    public Color CouleurCorde;      // Teinte que donne cette matière quand tressée
+    public float Durabilite;        // Résistance à l'usure (0-20)
+    public float TensionMax;       // Charge avant rupture (0-20)
+    public float Flexibilite;      // 0-1 : capacité à être tressée/retressée (herbe=1, liane=0.7, boyau=0.5)
+    public bool Fragile;           // Se dégrade vite
+    public bool Etirable;          // Peut s'allonger sous tension
+}
+
 /// <summary>Slot d'inventaire avec ADN morphologique (forme) et chimique (composition).</summary>
 public struct SlotInventaire
 {
@@ -13,6 +25,20 @@ public struct SlotInventaire
     public Mesh MeshEclat;
     /// <summary>Nombre de fractures subies (0 = intact). Conservé au ramassage/lancer pour poudre au-delà de 5.</summary>
     public int NiveauFracture;
+    /// <summary>Échelle de l'éclat au ramassage (évite qu'il grossisse au relancer).</summary>
+    public Vector3 ScaleEclat;
+
+    public SlotInventaire()
+    {
+        ID = 0;
+        IndexMorphologique = 0;
+        IndexChimique = 0;
+        EstUnEclat = false;
+        MeshEclat = null;
+        NiveauFracture = 0;
+        ScaleEclat = Vector3.One;
+    }
+
     public bool EstVide => ID == 0;
 }
 
@@ -144,14 +170,13 @@ public partial class Joueur : CharacterBody3D
             {
                 // IDENTIFICATION DE LA MATIÈRE : Est-ce du terrain (Voxel) ?
                 bool estTerrainVoxel = mainActive.ID >= 1 && mainActive.ID <= 9;
-                // Si c'est du terrain OU que le clic a été très bref, on pose sur le sol (fusion ou dépose)
-                if (estTerrainVoxel || _forceLancer < 0.2f)
+                // Clic bref = poser. Maintien du clic = lancer (seuil ~0,4 s pour éviter de lancer par accident).
+                if (estTerrainVoxel || _forceLancer < 0.4f)
                 {
                     ExecuterPlacement();
                 }
                 else
                 {
-                    // C'est un objet physique (pierre, arme) ET le clic a été long -> On lance
                     ExecuterLancer(Mathf.Clamp(_forceLancer, 0.5f, 2.0f));
                 }
                 _forceLancer = 0f;
@@ -167,6 +192,11 @@ public partial class Joueur : CharacterBody3D
             MainGaucheEstActive = !MainGaucheEstActive;
             RafraichirHUD();
             GD.Print(MainGaucheEstActive ? "ZERO-K : Main Gauche sélectionnée." : "ZERO-K : Main Droite sélectionnée.");
+        }
+        else if (@event is InputEventKey keyEvent && keyEvent.Pressed && !keyEvent.Echo)
+        {
+            if (keyEvent.Keycode == Key.T)
+                ExecuterTressage();
         }
     }
 
@@ -248,16 +278,18 @@ public partial class Joueur : CharacterBody3D
     private void MettreAJourObjetEnMain()
     {
         var main = MainGaucheEstActive ? MainGauche : MainDroite;
-        if (main.EstVide || !EstObjetProcedural(main.ID))
+        if (main.EstVide || !EstObjetAvecVisuel(main.ID))
         {
             _objetEnMain.Mesh = null;
+            _objetEnMain.MaterialOverride = null;
             return;
         }
         Mesh m = main.EstUnEclat ? main.MeshEclat : ObtenirMeshDepuisCache(main.ID, main.IndexMorphologique);
         _objetEnMain.Mesh = m;
-        if (m != null && !main.EstUnEclat)
-            AppliquerMaterielObjet(_objetEnMain, main.ID, main.IndexChimique);
-        // Éclat : le mesh a déjà le matériel intégré (SurfaceTool)
+        if (main.EstUnEclat)
+            _objetEnMain.MaterialOverride = null; // Éclat : matériau intégré au mesh (SurfaceTool)
+        else if (m != null)
+            AppliquerMaterielObjet(_objetEnMain, main.ID, main.IndexChimique, main.ID == 20 ? main.IndexMorphologique : 0, main.ID == 20 ? main.NiveauFracture : 0);
     }
 
     /// <summary>Assigne le Mesh exact au SubViewport de chaque slot (pierre en 3D dans l'UI).</summary>
@@ -269,26 +301,181 @@ public partial class Joueur : CharacterBody3D
 
     private void MettreAJourPreviewSlot(MeshInstance3D meshNode, SlotInventaire slot)
     {
-        if (slot.EstVide || !EstObjetProcedural(slot.ID))
+        if (slot.EstVide || !EstObjetAvecVisuel(slot.ID))
         {
             meshNode.Mesh = null;
+            meshNode.MaterialOverride = null;
             return;
         }
         Mesh m = slot.EstUnEclat ? slot.MeshEclat : ObtenirMeshDepuisCache(slot.ID, slot.IndexMorphologique);
         meshNode.Mesh = m;
-        if (m != null && !slot.EstUnEclat)
-            AppliquerMaterielObjet(meshNode, slot.ID, slot.IndexChimique);
-        // Éclat : le mesh a déjà le matériel intégré
+        if (slot.EstUnEclat)
+            meshNode.MaterialOverride = null; // Éclat : matériau intégré au mesh
+        else if (m != null)
+            AppliquerMaterielObjet(meshNode, slot.ID, slot.IndexChimique, slot.ID == 20 ? slot.IndexMorphologique : 0, slot.ID == 20 ? slot.NiveauFracture : 0);
     }
 
-    /// <summary>Cache le SubViewport quand pas de pierre procédurale, pour laisser voir la couleur du slot.</summary>
+    /// <summary>Cache le SubViewport quand pas d'objet avec visuel (pierre, fibre, corde), pour laisser voir la couleur du slot.</summary>
     private void MettreAJourVisibilitePreviews()
     {
-        if (_viewportSlotGauche != null) _viewportSlotGauche.Visible = !MainGauche.EstVide && EstObjetProcedural(MainGauche.ID);
-        if (_viewportSlotDroite != null) _viewportSlotDroite.Visible = !MainDroite.EstVide && EstObjetProcedural(MainDroite.ID);
+        if (_viewportSlotGauche != null) _viewportSlotGauche.Visible = !MainGauche.EstVide && EstObjetAvecVisuel(MainGauche.ID);
+        if (_viewportSlotDroite != null) _viewportSlotDroite.Visible = !MainDroite.EstVide && EstObjetAvecVisuel(MainDroite.ID);
     }
 
     private static bool EstObjetProcedural(int id) => id == 10 || id == 11 || id == 12;
+
+    /// <summary>True si l'objet a un mesh à afficher en main / preview (pierre, silex, fibre, corde).</summary>
+    private static bool EstObjetAvecVisuel(int id) => id == 10 || id == 11 || id == 12 || id == 15 || id == 20;
+
+    private static bool EstMatiereFlexible(int id)
+    {
+        int[] flexibles = { 15, 16, 17, 20 }; // 20 = corde : flexible, peut être retressée
+        return Array.IndexOf(flexibles, id) != -1;
+    }
+
+    private static bool EstObjetRigide(int id)
+    {
+        return id >= 10 && id <= 14;
+    }
+
+    /// <summary>Table des matières flexibles (comme TableGeologique pour les roches). ID 15=herbe, 16=liane, 17=boyau. Ajouter racine traitée etc. plus tard.</summary>
+    private static readonly ProfilMatiereFlexible[] TableMatiereFlexible = new ProfilMatiereFlexible[]
+    {
+        new ProfilMatiereFlexible { Nom = "Herbe", CouleurCorde = new Color(0.35f, 0.52f, 0.18f), Durabilite = 4f, TensionMax = 3f, Flexibilite = 1f, Fragile = true, Etirable = false },
+        new ProfilMatiereFlexible { Nom = "Liane", CouleurCorde = new Color(0.4f, 0.38f, 0.22f), Durabilite = 10f, TensionMax = 8f, Flexibilite = 0.7f, Fragile = false, Etirable = false },
+        new ProfilMatiereFlexible { Nom = "Boyau", CouleurCorde = new Color(0.6f, 0.45f, 0.35f), Durabilite = 14f, TensionMax = 14f, Flexibilite = 0.5f, Fragile = false, Etirable = true }
+    };
+
+    private const float SEUIL_MIN_FLEXIBILITE = 0.18f;   // En-dessous = trop rigide pour tresser
+    private const float PERTE_FLEX_PAR_MIX = 0.38f;      // Chaque retressage réduit la flexibilité (~38 %)
+
+    private static int IdFlexibleToIndex(int id)
+    {
+        if (id == 15) return 0; if (id == 16) return 1; if (id == 17) return 2;
+        return -1;
+    }
+
+    private static bool ObtenirProfilFlexible(int id, out ProfilMatiereFlexible p)
+    {
+        int i = IdFlexibleToIndex(id);
+        if (i < 0 || i >= TableMatiereFlexible.Length) { p = default; return false; }
+        p = TableMatiereFlexible[i]; return true;
+    }
+
+    /// <summary>Flexibilité effective d'un slot : fibre = Flexibilite de la table, corde = baseFlex * (1 - perte par niveau). Tier 2 + tier 1 = on peut tresser si les deux ont assez de flex.</summary>
+    private static float ObtenirFlexibiliteEffective(SlotInventaire slot)
+    {
+        if (slot.ID == 20)
+        {
+            float fa = ObtenirProfilFlexible(slot.IndexChimique, out var pa) ? pa.Flexibilite : 0.5f;
+            float fb = ObtenirProfilFlexible(slot.IndexMorphologique, out var pb) ? pb.Flexibilite : 0.5f;
+            float baseFlex = (fa + fb) * 0.5f;
+            return baseFlex * Mathf.Max(0f, 1f - slot.NiveauFracture * PERTE_FLEX_PAR_MIX);
+        }
+        return ObtenirProfilFlexible(slot.ID, out var p) ? p.Flexibilite : 0f;
+    }
+
+    /// <summary>Teinte de la corde selon les deux matières tressées. Chaque retressage assombrit un peu.</summary>
+    private static Color ObtenirTeinteCordeTressage(int idMatiereA, int idMatiereB, int niveauTressage = 0)
+    {
+        bool okA = ObtenirProfilFlexible(idMatiereA, out var pa);
+        bool okB = ObtenirProfilFlexible(idMatiereB, out var pb);
+        Color c;
+        if (!okA && !okB) c = new Color(0.52f, 0.42f, 0.28f);
+        else if (!okA) c = pb.CouleurCorde;
+        else if (!okB) c = pa.CouleurCorde;
+        else c = new Color(
+            (pa.CouleurCorde.R + pb.CouleurCorde.R) * 0.5f,
+            (pa.CouleurCorde.G + pb.CouleurCorde.G) * 0.5f,
+            (pa.CouleurCorde.B + pb.CouleurCorde.B) * 0.5f
+        );
+        if (niveauTressage > 0) c = c * Mathf.Pow(0.84f, niveauTressage);
+        return c;
+    }
+
+    /// <summary>Matériau corde : si 2 matières différentes = dégradé (on voit ce qui est mixé). Chaque retressage assombrit.</summary>
+    private static Material ObtenirMaterielCorde(int idA, int idB, int niveauTressage)
+    {
+        float assombri = niveauTressage > 0 ? Mathf.Pow(0.84f, niveauTressage) : 1f;
+        Color ca = (ObtenirProfilFlexible(idA, out var pa) ? pa.CouleurCorde : new Color(0.52f, 0.42f, 0.28f)) * assombri;
+        Color cb = (ObtenirProfilFlexible(idB, out var pb) ? pb.CouleurCorde : new Color(0.52f, 0.42f, 0.28f)) * assombri;
+        var mat = new StandardMaterial3D { Roughness = 0.85f };
+        if (idA == idB)
+        {
+            mat.AlbedoColor = ca;
+        }
+        else
+        {
+            var grad = new Gradient();
+            grad.AddPoint(0f, ca);
+            grad.AddPoint(1f, cb);
+            var tex = new GradientTexture2D { Width = 32, Height = 64, Gradient = grad };
+            tex.FillFrom = new Vector2(0.5f, 0f);
+            tex.FillTo = new Vector2(0.5f, 1f);
+            mat.AlbedoTexture = tex;
+        }
+        return mat;
+    }
+
+    /// <summary>Durabilité et tension de la corde : tressage = flexible mais un peu moins que les brins bruts, mais plus résistant et supporte plus de tension/force.</summary>
+    private static void ObtenirStatsCorde(int idA, int idB, out float durabilite, out float tensionMax)
+    {
+        bool okA = ObtenirProfilFlexible(idA, out var pa);
+        bool okB = ObtenirProfilFlexible(idB, out var pb);
+        if (!okA && !okB) { durabilite = 6f; tensionMax = 5f; return; }
+        if (!okA) { pa = pb; } if (!okB) { pb = pa; }
+        float baseDurabilite = (pa.Durabilite + pb.Durabilite) * 0.5f;
+        float baseTension = (pa.TensionMax + pb.TensionMax) * 0.5f;
+        durabilite = baseDurabilite * 1.35f;  // Corde plus résistante que les fibres brutes
+        tensionMax = baseTension * 1.5f;      // Supporte plus de tension et de force
+        if (pa.Fragile || pb.Fragile) durabilite *= 0.75f;
+    }
+
+    private static Mesh _cacheMeshCorde;
+
+    private static Mesh CreerMeshCordeTressee()
+    {
+        if (_cacheMeshCorde != null) return _cacheMeshCorde;
+        const float rayonHelice = 0.026f;
+        const float rayonTube = 0.012f;
+        const float hauteur = 0.28f;
+        const int nbTours = 3;
+        const int ringsParStrand = 24;
+        const int segsParRing = 6;
+        var st = new SurfaceTool();
+        st.Begin(Mesh.PrimitiveType.Triangles);
+        for (int strand = 0; strand < 3; strand++)
+        {
+            float phase = strand * Mathf.Tau / 3f;
+            for (int r = 0; r < ringsParStrand; r++)
+            {
+                float t = r / (float)(ringsParStrand - 1);
+                float angle = phase + t * nbTours * Mathf.Tau;
+                Vector3 centre = new Vector3(rayonHelice * Mathf.Cos(angle), t * hauteur - hauteur * 0.5f, rayonHelice * Mathf.Sin(angle));
+                Vector3 tangent = new Vector3(-Mathf.Sin(angle), hauteur / (rayonHelice * nbTours * Mathf.Tau), Mathf.Cos(angle)).Normalized();
+                Vector3 radial = new Vector3(Mathf.Cos(angle), 0, Mathf.Sin(angle));
+                Vector3 binormal = tangent.Cross(radial).Normalized();
+                for (int s = 0; s < segsParRing; s++)
+                {
+                    float a = s * Mathf.Tau / segsParRing;
+                    Vector3 offset = (radial * Mathf.Cos(a) + binormal * Mathf.Sin(a)) * rayonTube;
+                    st.AddVertex(centre + offset);
+                }
+            }
+            for (int r = 0; r < ringsParStrand - 1; r++)
+                for (int s = 0; s < segsParRing; s++)
+                {
+                    int v = strand * ringsParStrand * segsParRing + r * segsParRing + s;
+                    int vn = v + segsParRing;
+                    int s1 = (s + 1) % segsParRing;
+                    st.AddIndex(v); st.AddIndex(v + s1); st.AddIndex(vn);
+                    st.AddIndex(vn); st.AddIndex(v + s1); st.AddIndex(vn + s1);
+                }
+        }
+        st.GenerateNormals();
+        _cacheMeshCorde = st.Commit();
+        return _cacheMeshCorde;
+    }
 
     private static Mesh ObtenirMeshDepuisCache(int id, int index)
     {
@@ -302,14 +489,19 @@ public partial class Joueur : CharacterBody3D
             var cache = ItemPhysique.CacheMeshCaillou;
             if (index >= 0 && index < cache.Count) return cache[index];
         }
+        else if (id == 15) return new CapsuleMesh { Radius = 0.009f, Height = 0.34f };
+        else if (id == 20) return CreerMeshCordeTressee();
         return null;
     }
 
-    private static void AppliquerMaterielObjet(MeshInstance3D visuel, int idObjet, int indexChimique)
+    private static void AppliquerMaterielObjet(MeshInstance3D visuel, int idObjet, int indexChimique, int indexMorphologique = 0, int niveauTressage = 0)
     {
+        if (idObjet == 15) { visuel.MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.35f, 0.55f, 0.15f), Roughness = 0.9f }; return; }
+        if (idObjet == 20) { visuel.MaterialOverride = ObtenirMaterielCorde(indexChimique, indexMorphologique, niveauTressage); return; }
         int chimique = Mathf.Clamp(indexChimique, 0, ItemPhysique.TableGeologique.Length - 1);
         visuel.MaterialOverride = ItemPhysique.CreerMaterielProcedural(idObjet == 11, chimique);
     }
+
 
     /// <summary>Phase 1 pure : minage du terrain Marching Cubes uniquement. Clic gauche.</summary>
     private void ExecuterMinageVoxel()
@@ -364,7 +556,7 @@ public partial class Joueur : CharacterBody3D
         if (objetTouche.IsInGroup("BlocsPoses"))
         {
             int id = objetTouche.HasMeta("ID_Matiere") ? (int)objetTouche.GetMeta("ID_Matiere").AsInt32() : 1;
-            var item = objetTouche as ItemPhysique ?? (objetTouche as Node)?.GetNodeOrNull<ItemPhysique>("ItemPhysique");
+            var item = objetTouche as ItemPhysique ?? (objetTouche as Node)?.GetParent() as ItemPhysique ?? (objetTouche as Node)?.GetNodeOrNull<ItemPhysique>("ItemPhysique");
             nouveauSlot = new SlotInventaire
             {
                 ID = id,
@@ -372,12 +564,21 @@ public partial class Joueur : CharacterBody3D
                 IndexChimique = item?.IndexChimique ?? 0,
                 EstUnEclat = item?.EstUnEclat ?? false,
                 MeshEclat = (item != null && item.EstUnEclat) ? item.ObtenirMeshVisuel() : null,
-                NiveauFracture = item?.NiveauFracture ?? 0
+                NiveauFracture = item?.NiveauFracture ?? 0,
+                ScaleEclat = (item != null && item.EstUnEclat) ? item.Scale : Vector3.One
             };
         }
         else if (objetTouche is RigidBody3D rb)
         {
-            var item = rb as ItemPhysique ?? rb.GetNodeOrNull<ItemPhysique>("ItemPhysique");
+            // BlocChutant (fibre, buisson tombé) : pas d'ItemPhysique, on lit le meta.
+            if (objetTouche is BlocChutant)
+            {
+                int id = objetTouche.HasMeta("ID_Matiere") ? (int)objetTouche.GetMeta("ID_Matiere").AsInt32() : 1;
+                nouveauSlot = new SlotInventaire { ID = id, IndexMorphologique = 0, IndexChimique = 0 };
+            }
+            else
+            {
+            var item = rb as ItemPhysique ?? (rb as Node)?.GetParent() as ItemPhysique ?? rb.GetNodeOrNull<ItemPhysique>("ItemPhysique");
             if (item == null) return;
             if (item.ID_Objet == 13 || item.ID_Objet == 14)
             {
@@ -390,8 +591,11 @@ public partial class Joueur : CharacterBody3D
                 IndexMorphologique = item.IndexCacheMemoire,
                 IndexChimique = item.IndexChimique,
                 EstUnEclat = item.EstUnEclat,
-                MeshEclat = item.EstUnEclat ? item.ObtenirMeshVisuel() : null
+                MeshEclat = item.EstUnEclat ? item.ObtenirMeshVisuel() : null,
+                NiveauFracture = item.NiveauFracture,
+                ScaleEclat = item.EstUnEclat ? item.Scale : Vector3.One
             };
+            }
         }
         else if (objetTouche is StaticBody3D sb)
         {
@@ -409,7 +613,8 @@ public partial class Joueur : CharacterBody3D
                 IndexChimique = item.IndexChimique,
                 EstUnEclat = item.EstUnEclat,
                 MeshEclat = item.EstUnEclat ? item.ObtenirMeshVisuel() : null,
-                NiveauFracture = item.NiveauFracture
+                NiveauFracture = item.NiveauFracture,
+                ScaleEclat = item.EstUnEclat ? item.Scale : Vector3.One
             };
         }
         else
@@ -429,6 +634,61 @@ public partial class Joueur : CharacterBody3D
         }
         objetTouche.QueueFree();
         RafraichirHUD();
+    }
+
+    /// <summary>Craft émergent : tressage de deux matières flexibles en corde (ID 20). La corde est le résultat dynamique : teinte, durabilité et tension viennent des deux matières (TableMatiereFlexible). Touche T.</summary>
+    private void ExecuterTressage()
+    {
+        if (MainGauche.EstVide || MainDroite.EstVide)
+        {
+            GD.Print("ZERO-K : Il faut deux matériaux pour initier une torsion.");
+            return;
+        }
+        if (!EstMatiereFlexible(MainGauche.ID) || !EstMatiereFlexible(MainDroite.ID))
+        {
+            GD.Print("ZERO-K : Torsion impossible. Au moins l'un des matériaux est trop rigide et se briserait.");
+            return;
+        }
+        float flexG = ObtenirFlexibiliteEffective(MainGauche);
+        float flexD = ObtenirFlexibiliteEffective(MainDroite);
+        if (flexG < SEUIL_MIN_FLEXIBILITE || flexD < SEUIL_MIN_FLEXIBILITE)
+        {
+            GD.Print("ZERO-K : Au moins l'un des matériaux n'est plus assez flexible pour être tressé (épaisseur, rigidité).");
+            return;
+        }
+        // Corde (20) = flexible si niveau < max. On "déplie" les matières (IndexChimique, IndexMorphologique pour une corde).
+        int m1a = MainGauche.ID == 20 ? MainGauche.IndexChimique : MainGauche.ID;
+        int m1b = MainGauche.ID == 20 ? MainGauche.IndexMorphologique : MainGauche.ID;
+        int m2a = MainDroite.ID == 20 ? MainDroite.IndexChimique : MainDroite.ID;
+        int m2b = MainDroite.ID == 20 ? MainDroite.IndexMorphologique : MainDroite.ID;
+        int idA = Mathf.Min(Mathf.Min(m1a, m1b), Mathf.Min(m2a, m2b));
+        int idB = Mathf.Max(Mathf.Max(m1a, m1b), Mathf.Max(m2a, m2b));
+        ObtenirStatsCorde(idA, idB, out float durabilite, out float tensionMax);
+        ObtenirProfilFlexible(idA, out var pa);
+        ObtenirProfilFlexible(idB, out var pb);
+        bool estRetressage = MainGauche.ID == 20 || MainDroite.ID == 20;
+        int niveauTressage = estRetressage ? Mathf.Max(MainGauche.ID == 20 ? MainGauche.NiveauFracture : 0, MainDroite.ID == 20 ? MainDroite.NiveauFracture : 0) + 1 : 0;
+        GD.Print("ZERO-K : Tressage systémique en cours...");
+        SlotInventaire cordeSystemique = new SlotInventaire
+        {
+            ID = 20,
+            IndexChimique = idA,
+            IndexMorphologique = idB,
+            EstUnEclat = false,
+            NiveauFracture = niveauTressage  // 0 = simple, 1+ = retressée (plus foncé)
+        };
+        if (MainGaucheEstActive)
+        {
+            MainGauche = cordeSystemique;
+            MainDroite = default;
+        }
+        else
+        {
+            MainDroite = cordeSystemique;
+            MainGauche = default;
+        }
+        RafraichirHUD();
+        GD.Print($"ZERO-K : Liaison réussie. Corde {pa.Nom}-{pb.Nom} : durabilité {durabilite:F0}, tension max {tensionMax:F0}.");
     }
 
     /// <summary>Placement (construction ou rejet d'objet). Clic droit.</summary>
@@ -458,8 +718,8 @@ public partial class Joueur : CharacterBody3D
         {
             _gestionnaireMonde?.AppliquerCreationGlobale(pointImpact, normaleImpact, RAYON_SCULPTURE, id);
         }
-        // Objets physiques (roches, silex, buisson) → déposer un bloc au sol
-        else if (id == 999 || id == 10 || id == 11 || id == 12)
+        // Objets physiques (roches, silex, buisson, fibre, corde) → déposer un bloc au sol
+        else if (id == 999 || id == 10 || id == 11 || id == 12 || id == 15 || id == 20)
         {
             CreerBlocPose(pointDeChute, mainActive);
         }
@@ -474,7 +734,7 @@ public partial class Joueur : CharacterBody3D
         RafraichirHUD();
     }
 
-    /// <summary>Frappe la roche visée : impulsion + dégâts. Si résistance à 0 → fracture. force = temps de charge (0.1 à 2 s).</summary>
+    /// <summary>Frappe la roche visée : impulsion + dégâts. Si résistance à 0 → fracture. Lame (Silex/Éclat) sur sol → fauchage.</summary>
     private void ExecuterFrappe(float force)
     {
         SlotInventaire mainActive = MainGaucheEstActive ? MainGauche : MainDroite;
@@ -484,7 +744,18 @@ public partial class Joueur : CharacterBody3D
 
         Object colliderObj = _rayon.GetCollider();
         Node objetTouche = colliderObj as Node;
-        if (objetTouche == null) return; // Pas de cible valide (terrain bas-niveau ou autre)
+
+        // Frappe sur le sol ou le vide : si la main tient une lame (Silex ou Éclat), fauchage.
+        if (objetTouche == null || objetTouche.Name.ToString().Contains("TerrainSection") || objetTouche.Name.ToString().Contains("CollisionSection"))
+        {
+            if (mainActive.EstUnEclat || mainActive.ID == 11)
+            {
+                Vector3 pointImpact = _rayon.GetCollisionPoint();
+                _gestionnaireMonde?.AppliquerFauchageGlobal(pointImpact, 1.5f);
+                GD.Print("ZERO-K : Lame appliquée sur le sol. Fauchage en cours.");
+            }
+            return;
+        }
 
         RigidBody3D rbCible = objetTouche as RigidBody3D;
         if (rbCible == null && objetTouche.HasNode("ItemPhysique"))
@@ -542,13 +813,14 @@ public partial class Joueur : CharacterBody3D
         Node3D corps;
         if (mainActive.EstUnEclat && mainActive.MeshEclat != null)
         {
-            // Reconstruction de l'éclat jeté : mesh dynamique conservé, reste un éclat pour la vie
+            // Reconstruction de l'éclat jeté : mesh + échelle conservés pour garder la même taille
             var item = new ItemPhysique
             {
                 ID_Objet = mainActive.ID,
                 IndexChimique = mainActive.IndexChimique,
                 EstUnEclat = true,
                 NiveauFracture = mainActive.NiveauFracture,
+                Scale = mainActive.ScaleEclat,
                 Name = "ItemPhysique"
             };
             item.AddChild(new MeshInstance3D { Name = "MeshInstance3D", Mesh = mainActive.MeshEclat });
@@ -569,6 +841,30 @@ public partial class Joueur : CharacterBody3D
             var item = new ItemPhysique { ID_Objet = id, IndexCacheMemoire = mainActive.IndexMorphologique, IndexChimique = mainActive.IndexChimique, NiveauFracture = mainActive.NiveauFracture, Name = "ItemPhysique" };
             item.AddChild(new MeshInstance3D { Mesh = new PrismMesh { Size = new Vector3(0.2f, 0.15f, 0.25f) } });
             item.AddChild(new CollisionShape3D { Shape = new BoxShape3D { Size = new Vector3(0.2f, 0.15f, 0.25f) } });
+            corps = item;
+        }
+        else if (id == 15) // Fibre d'herbe : fagot de brins (capsules = tiges organiques)
+        {
+            var item = new ItemPhysique { ID_Objet = id, Name = "ItemPhysique" };
+            var matHerbe = new StandardMaterial3D { AlbedoColor = new Color(0.35f, 0.55f, 0.15f), Roughness = 0.9f, Metallic = 0f };
+            float l = 0.38f;
+            for (int i = 0; i < 6; i++)
+            {
+                float a = (i / 6f) * Mathf.Pi * 0.6f - 0.15f;
+                float x = Mathf.Sin(a) * 0.025f; float z = Mathf.Cos(a) * 0.025f;
+                var mi = new MeshInstance3D { Mesh = new CapsuleMesh { Radius = 0.01f, Height = l - 0.02f }, MaterialOverride = matHerbe, Position = new Vector3(x, l * 0.5f, z), Rotation = new Vector3(0.08f * (i - 3), 0.1f * (i % 2 - 0.5f), 0.06f * (i - 2)) };
+                item.AddChild(mi);
+            }
+            item.AddChild(new CollisionShape3D { Shape = new BoxShape3D { Size = new Vector3(0.12f, l, 0.12f) }, Position = new Vector3(0, l * 0.5f, 0) });
+            corps = item;
+        }
+        else if (id == 20) // Tressage / corde : dégradé des 2 matières (on voit ce qui est mixé). Chaque retressage assombrit.
+        {
+            int idA = mainActive.IndexChimique, idB = mainActive.IndexMorphologique;
+            var item = new ItemPhysique { ID_Objet = id, IndexChimique = idA, IndexCacheMemoire = idB, NiveauFracture = mainActive.NiveauFracture, Name = "ItemPhysique" };
+            var matCorde = ObtenirMaterielCorde(idA, idB, mainActive.NiveauFracture);
+            item.AddChild(new MeshInstance3D { Mesh = CreerMeshCordeTressee(), MaterialOverride = matCorde });
+            item.AddChild(new CollisionShape3D { Shape = new CylinderShape3D { Radius = 0.045f, Height = 0.28f } });
             corps = item;
         }
         else // 999 Buisson

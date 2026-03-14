@@ -775,6 +775,21 @@ public partial class Monde_Serveur : Node
 			}
 	}
 
+	public void AppliquerFauchageGlobal(Vector3 pointImpact, float rayon)
+	{
+		int cxMin = Gestionnaire_Monde.WorldToChunkCoord(pointImpact.X - rayon, pointImpact.Z, TailleChunk).X;
+		int cxMax = Gestionnaire_Monde.WorldToChunkCoord(pointImpact.X + rayon, pointImpact.Z, TailleChunk).X;
+		int czMin = Gestionnaire_Monde.WorldToChunkCoord(pointImpact.X, pointImpact.Z - rayon, TailleChunk).Y;
+		int czMax = Gestionnaire_Monde.WorldToChunkCoord(pointImpact.X, pointImpact.Z + rayon, TailleChunk).Y;
+
+		for (int cx = cxMin; cx <= cxMax; cx++)
+			for (int cz = czMin; cz <= czMax; cz++)
+			{
+				var chunk = ObtenirOuCreerChunk(new Vector2I(cx, cz));
+				chunk.FaucherFlore(pointImpact, rayon);
+			}
+	}
+
 	public void AppliquerCreationGlobale(Vector3 pointImpact, Vector3 normale, float rayon, int idMatiere = 1)
 	{
 		_modificationEnCours = true;

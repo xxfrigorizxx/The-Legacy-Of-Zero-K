@@ -82,7 +82,26 @@ public partial class ItemPhysique : RigidBody3D
 			IndexChimique = GD.RandRange(0, TableGeologique.Length - 1);
 
 		// LE BOUCLIER : Si c'est un éclat coupé procéduralement, on ne génère RIEN depuis le cache.
-		if (EstUnEclat) return;
+		if (EstUnEclat)
+		{
+			// RÉVEIL PHYSIQUE : Il faut activer ses sens pour qu'il puisse re-casser en le jetant !
+			if (ID_Objet != 11)
+			{
+				ContactMonitor = true;
+				MaxContactsReported = 1;
+				BodyEntered += SurImpactPhysique;
+				_surImpactConnecte = true;
+			}
+			return;
+		}
+
+		// Fibre (15) et Tressage (20) : mesh et matériau déjà assignés par Joueur.CreerBlocPose / BlocChutant. Ne pas écraser par le cache roche.
+		if (ID_Objet == 15 || ID_Objet == 20)
+		{
+			Mass = 0.08f;
+			ResistanceActuelle = 1f;
+			return;
+		}
 
 		AppliquerMateriel(visuel);
 
@@ -241,12 +260,20 @@ public partial class ItemPhysique : RigidBody3D
 		// Fallback : méthode par contour (si découpe mesh échoue). Cuire le scale dans les sommets pour éviter accordéon UV.
 		Vector3[] sommetsActuels = monVisuel.Mesh.GetFaces();
 		if (sommetsActuels == null || sommetsActuels.Length == 0) { QueueFree(); return; }
-		Vector3 echelleMere = Scale;
+
+		// --- LE BAKE SCALE (CUISSON DE L'ADN) ---
+		// Écrase les atomes selon le Scale du parent, pour que l'éclat naisse pur (Scale 1,1,1).
+		Vector3 echelleMere = this.Scale;
 		for (int i = 0; i < sommetsActuels.Length; i++)
 		{
-			Vector3 p = sommetsActuels[i];
-			sommetsActuels[i] = new Vector3(p.X * echelleMere.X, p.Y * echelleMere.Y, p.Z * echelleMere.Z);
+			sommetsActuels[i] = new Vector3(
+				sommetsActuels[i].X * echelleMere.X,
+				sommetsActuels[i].Y * echelleMere.Y,
+				sommetsActuels[i].Z * echelleMere.Z
+			);
 		}
+		// ----------------------------------------
+
 		var ptsA = new List<Vector3>();
 		var ptsB = new List<Vector3>();
 		foreach (Vector3 pt in sommetsActuels)
@@ -931,9 +958,13 @@ public partial class ItemPhysique : RigidBody3D
 			if (cr.LengthSquared() < 0.0001f) return;
 			Vector3 n = cr.Normalized();
 			if (Mathf.Abs(n.Dot(normaleDeCoupe)) > 0.9f) n = normalPlan * Mathf.Sign(n.Dot(normalPlan));
-			st.SetNormal(n); st.SetUV(UVNorm(a)); st.AddVertex(a);
-			st.SetNormal(n); st.SetUV(UVNorm(b)); st.AddVertex(b);
-			st.SetNormal(n); st.SetUV(UVNorm(c)); st.AddVertex(c);
+			// Projection orthogonale (évite l'effet d'étoile sur la texture)
+			Vector3 axeU = n.Cross(Vector3.Up).Normalized();
+			if (axeU.LengthSquared() < 0.01f) axeU = n.Cross(Vector3.Right).Normalized();
+			Vector3 axeV = n.Cross(axeU).Normalized();
+			st.SetNormal(n); st.SetUV(new Vector2(a.Dot(axeU), a.Dot(axeV))); st.AddVertex(a);
+			st.SetNormal(n); st.SetUV(new Vector2(b.Dot(axeU), b.Dot(axeV))); st.AddVertex(b);
+			st.SetNormal(n); st.SetUV(new Vector2(c.Dot(axeU), c.Dot(axeV))); st.AddVertex(c);
 			aDesSommetsAvecUV = true;
 		}
 

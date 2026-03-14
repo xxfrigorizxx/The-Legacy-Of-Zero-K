@@ -465,15 +465,23 @@ public partial class Chunk_Client : Node3D
 			float angle = (float)((kv.Key.X * 73856093 ^ kv.Key.Z * 19349663) % 10000) / 10000f * Mathf.Tau;
 			Vector3 posMonde = new Vector3(kv.Key.X + 0.5f, kv.Key.Y + 0.5f, kv.Key.Z + 0.5f);
 
-			if (((kv.Key.X + kv.Key.Z) & 1) == 0)
+			Color couleurSol = ObtenirCouleurTerrainApproxThreadSafe(kv.Key.X, kv.Key.Y, kv.Key.Z);
+			Color couleurHerbe = new Color(couleurSol.R * 0.8f, couleurSol.G * 0.8f, couleurSol.B * 0.8f, 1f).Lerp(new Color(0.7f, 0.8f, 1f), 0.1f);
+			uint hashBase = (uint)(kv.Key.X * 73856093) ^ (uint)(kv.Key.Z * 19349663);
+			int densiteGazon = 14;
+			for (int i = 0; i < densiteGazon; i++)
 			{
-				Color couleurSol = ObtenirCouleurTerrainApproxThreadSafe(kv.Key.X, kv.Key.Y, kv.Key.Z);
-				Color couleurHerbe = new Color(couleurSol.R * 0.8f, couleurSol.G * 0.8f, couleurSol.B * 0.8f, 1f).Lerp(new Color(0.7f, 0.8f, 1f), 0.1f);
+				uint h_brin = hashBase ^ (uint)(i * 83492791);
+				float offsetX = ((h_brin % 100) / 100f) - 0.5f;
+				float offsetZ = (((h_brin / 100) % 100) / 100f) - 0.5f;
+				float echelleAlea = 0.5f + ((h_brin % 50) / 100f);
+				float angleBrin = (h_brin % 360) * Mathf.Pi / 180f;
 				var tGazon = Transform3D.Identity;
-				tGazon.Origin = positionLocale;
-				tGazon.Basis = Basis.Identity.Scaled(new Vector3(EchelleGazon, EchelleGazon, EchelleGazon)).Rotated(Vector3.Up, angle);
-				payload.Gazon.Add((tGazon, couleurHerbe, posMonde));
+				tGazon.Origin = positionLocale + new Vector3(offsetX, 0, offsetZ);
+				tGazon.Basis = Basis.Identity.Scaled(new Vector3(EchelleGazon * echelleAlea, EchelleGazon * echelleAlea, EchelleGazon * echelleAlea)).Rotated(Vector3.Up, angleBrin);
+				payload.Gazon.Add((tGazon, couleurHerbe, posMonde + new Vector3(offsetX, 0, offsetZ)));
 			}
+
 			if (kv.Value == 1 || kv.Value == 2)
 			{
 				uint h = (uint)(kv.Key.X * 73856093) ^ (uint)(kv.Key.Z * 19349663) ^ (uint)(kv.Key.Y * 83492791);
@@ -550,19 +558,27 @@ public partial class Chunk_Client : Node3D
 			if (_mmGazon != null) _mmGazon.Multimesh = null;
 			return;
 		}
-		Mesh meshGazon = ChargerMeshFlore("res://Modeles/Botanique/grass.glb");
-		if (meshGazon == null) meshGazon = CreerMeshGazonFallback();
-		if (meshGazon == null) { _mmGazon.Multimesh = null; return; }
+
+		// FORÇAGE ABSOLU : On utilise le générateur C#, on ignore tout fichier externe.
+		if (_cacheMeshGazon == null)
+		{
+			_cacheMeshGazon = GenererMeshGazonProcedural();
+		}
+
+		Mesh meshGazon = _cacheMeshGazon;
+
 		var mm = new MultiMesh();
 		mm.TransformFormat = MultiMesh.TransformFormatEnum.Transform3D;
-		mm.UseColors = true;
+		mm.UseColors = true; // Le Shader a besoin du canal couleur
 		mm.Mesh = meshGazon;
 		mm.InstanceCount = gazonInstances.Count;
+
 		for (int i = 0; i < gazonInstances.Count; i++)
 		{
 			mm.SetInstanceTransform(i, gazonInstances[i].t);
 			mm.SetInstanceColor(i, gazonInstances[i].c);
 		}
+
 		_mmGazon.Multimesh = mm;
 		_mmGazon.MaterialOverride = ObtenirMaterielGazonSymbiotique();
 		_mmGazon.Visible = true;
@@ -659,14 +675,24 @@ public partial class Chunk_Client : Node3D
 			float angle = (float)((kv.Key.X * 73856093 ^ kv.Key.Z * 19349663) % 10000) / 10000f * Mathf.Tau;
 			Vector3 posMonde = new Vector3(kv.Key.X + 0.5f, kv.Key.Y + 0.5f, kv.Key.Z + 0.5f);
 
-			if (posMonde.DistanceSquaredTo(posObs) <= rayonCarre && ((kv.Key.X + kv.Key.Z) & 1) == 0)
+			if (posMonde.DistanceSquaredTo(posObs) <= rayonCarre)
 			{
-				var tGazon = Transform3D.Identity;
-				tGazon.Origin = positionLocale;
-				tGazon.Basis = Basis.Identity.Scaled(new Vector3(EchelleGazon, EchelleGazon, EchelleGazon)).Rotated(Vector3.Up, angle);
 				Color couleurSol = ObtenirCouleurTerrainApprox(kv.Key.X, kv.Key.Y, kv.Key.Z);
 				Color couleurHerbe = new Color(couleurSol.R * 0.8f, couleurSol.G * 0.8f, couleurSol.B * 0.8f, 1f).Lerp(new Color(0.7f, 0.8f, 1f), 0.1f);
-				gazonInstances.Add((tGazon, couleurHerbe));
+				uint hashBase = (uint)(kv.Key.X * 73856093) ^ (uint)(kv.Key.Z * 19349663);
+				int densiteGazon = 14;
+				for (int i = 0; i < densiteGazon; i++)
+				{
+					uint h_brin = hashBase ^ (uint)(i * 83492791);
+					float offsetX = ((h_brin % 100) / 100f) - 0.5f;
+					float offsetZ = (((h_brin / 100) % 100) / 100f) - 0.5f;
+					float echelleAlea = 0.5f + ((h_brin % 50) / 100f);
+					float angleBrin = (h_brin % 360) * Mathf.Pi / 180f;
+					var tGazon = Transform3D.Identity;
+					tGazon.Origin = positionLocale + new Vector3(offsetX, 0, offsetZ);
+					tGazon.Basis = Basis.Identity.Scaled(new Vector3(EchelleGazon * echelleAlea, EchelleGazon * echelleAlea, EchelleGazon * echelleAlea)).Rotated(Vector3.Up, angleBrin);
+					gazonInstances.Add((tGazon, couleurHerbe));
+				}
 			}
 			if (kv.Value == 1 || kv.Value == 2)
 			{
@@ -688,7 +714,6 @@ public partial class Chunk_Client : Node3D
 	private static Mesh _cacheMeshGazon;
 	private static Mesh _cacheMeshPlein;
 	private static Mesh _cacheMeshVide;
-	private static Material _cacheMaterielGazonAssombri;
 	private static Material _cacheMaterielGazonSymbiotique;
 
 	/// <summary>Couleur approximative du terrain à (x,y,z) — même formule que TerrainVoxel (temp/hum). Pour herbe symbiotique.</summary>
@@ -713,82 +738,53 @@ public partial class Chunk_Client : Node3D
 		return couleurBase;
 	}
 
-	/// <summary>ShaderMaterial symbiotique : albedo * COLOR (instance). Pour herbe qui épouse le sol givré.</summary>
+	/// <summary>ShaderMaterial procédural : gazon mat et organique (pas de plastique), vent, dégradé naturel.</summary>
 	private static Material ObtenirMaterielGazonSymbiotique()
 	{
 		if (_cacheMaterielGazonSymbiotique != null) return _cacheMaterielGazonSymbiotique;
-		var shader = GD.Load<Shader>("res://textures/Shader_Herbe.gdshader");
-		if (shader == null) return ObtenirMaterielGazonAssombri();
-		var mat = new ShaderMaterial();
-		mat.Shader = shader;
-		Texture2D texAlbedo = ExtraireTextureAlbedoDepuisGrass() ?? GD.Load<Texture2D>("res://textures/terrain/01_herbe.jpg");
-		if (texAlbedo != null) mat.SetShaderParameter("albedo_texture", texAlbedo);
+		var shader = new Shader();
+		shader.Code = @"
+shader_type spatial;
+render_mode cull_disabled, depth_draw_opaque;
+
+uniform vec3 couleur_pointe = vec3(0.38, 0.52, 0.18);
+uniform float force_vent = 0.15;
+uniform float vitesse_vent = 2.0;
+
+void vertex() {
+	vec3 pos_monde = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	float influence = 1.0 - UV.y;
+	float vent = sin(TIME * vitesse_vent + pos_monde.x * 0.5 + pos_monde.z * 0.5);
+	VERTEX.x += vent * force_vent * influence;
+	VERTEX.z += cos(TIME * vitesse_vent + pos_monde.x * 0.5) * force_vent * influence;
+}
+
+void fragment() {
+	vec3 couleur_base = COLOR.rgb;
+	vec3 couleur_racine = couleur_base * 0.55;
+	float mix_hauteur = 1.0 - UV.y;
+	mix_hauteur = pow(mix_hauteur, 1.4);
+	vec3 couleur_finale = mix(couleur_racine, couleur_pointe * couleur_base * 1.25, mix_hauteur);
+	float bruit = fract(sin(dot(FRAGCOORD.xy, vec2(12.9898, 78.233))) * 43758.5453);
+	couleur_finale *= 0.92 + bruit * 0.16;
+	ALBEDO = couleur_finale;
+	ROUGHNESS = 0.94;
+	SPECULAR = 0.0;
+	BACKLIGHT = couleur_finale * 0.12;
+}
+";
+		var mat = new ShaderMaterial { Shader = shader };
 		_cacheMaterielGazonSymbiotique = mat;
 		return mat;
 	}
 
-	private static Texture2D ExtraireTextureAlbedoDepuisGrass()
-	{
-		var scene = GD.Load<PackedScene>("res://Modeles/Botanique/grass.glb");
-		if (scene == null) return null;
-		Node racine = scene.Instantiate();
-		Material m = TrouverMaterielSurMeshInstance(racine);
-		racine.QueueFree();
-		if (m is StandardMaterial3D s && s.AlbedoTexture != null) return s.AlbedoTexture;
-		return null;
-	}
-
-	private static Material ObtenirMaterielGazonAssombri()
-	{
-		if (_cacheMaterielGazonAssombri != null) return _cacheMaterielGazonAssombri;
-		var scene = GD.Load<PackedScene>("res://Modeles/Botanique/grass.glb");
-		if (scene != null)
-		{
-			Node racine = scene.Instantiate();
-			Material orig = TrouverMaterielSurMeshInstance(racine);
-			racine.QueueFree();
-			if (orig != null)
-			{
-				var dupl = orig.Duplicate() as Material;
-				if (dupl is StandardMaterial3D s)
-				{
-					Color c = s.AlbedoColor;
-					s.AlbedoColor = new Color(c.R * 0.55f, c.G * 0.55f, c.B * 0.55f);
-					_cacheMaterielGazonAssombri = s;
-					return s;
-				}
-			}
-		}
-		var mat = new StandardMaterial3D();
-		mat.AlbedoColor = new Color(0.45f, 0.5f, 0.4f);
-		_cacheMaterielGazonAssombri = mat;
-		return mat;
-	}
-
-	private static Material TrouverMaterielSurMeshInstance(Node n)
-	{
-		if (n is MeshInstance3D mi)
-		{
-			Material m = mi.MaterialOverride ?? (mi.Mesh != null && mi.Mesh.GetSurfaceCount() > 0 ? mi.Mesh.SurfaceGetMaterial(0) : null);
-			if (m != null) return m;
-		}
-		foreach (Node enfant in n.GetChildren())
-		{
-			var r = TrouverMaterielSurMeshInstance(enfant);
-			if (r != null) return r;
-		}
-		return null;
-	}
-
 	private static Mesh ChargerMeshFlore(string path)
 	{
-		if (path.Contains("grass") && _cacheMeshGazon != null) return _cacheMeshGazon;
 		if (path.Contains("Plein") && _cacheMeshPlein != null) return _cacheMeshPlein;
 		if (path.Contains("Vide") && _cacheMeshVide != null) return _cacheMeshVide;
 		Mesh mesh = ChargerMeshDepuisScene(path);
 		if (mesh == null) { GD.PrintErr($"Chunk_Client: Échec extraction mesh depuis {path}"); return null; }
-		if (path.Contains("grass")) _cacheMeshGazon = mesh;
-		else if (path.Contains("Plein")) _cacheMeshPlein = mesh;
+		if (path.Contains("Plein")) _cacheMeshPlein = mesh;
 		else if (path.Contains("Vide")) _cacheMeshVide = mesh;
 		return mesh;
 	}
@@ -835,27 +831,39 @@ public partial class Chunk_Client : Node3D
 		return 1;
 	}
 
-	/// <summary>Si grass.glb échoue (structure différente), réessaie avec parcours complet ou utilise Buisson_Plein.</summary>
-	private static Mesh CreerMeshGazonFallback()
+	/// <summary>Génère 3 lames triangulaires (effilées) croisées à 60°. Normales biaisées vers le ciel pour éclairage unifié. Canal COLOR requis pour MultiMesh UseColors.</summary>
+	private static Mesh GenererMeshGazonProcedural()
 	{
-		var scene = GD.Load<PackedScene>("res://Modeles/Botanique/grass.glb");
-		if (scene == null) return null;
-		Node racine = scene.Instantiate();
-		foreach (Node n in ObtenirTousLesNoeuds(racine))
+		var st = new SurfaceTool();
+		st.Begin(Mesh.PrimitiveType.Triangles);
+
+		// FIX CRITIQUE : Création du canal de couleur pour autoriser le MultiMesh à peindre !
+		st.SetColor(new Color(1f, 1f, 1f, 1f));
+
+		float w = 0.06f;
+		float h = 0.175f;
+
+		void CreerLame(Vector3 centre, float angleY)
 		{
-			if (n is MeshInstance3D mi && mi.Mesh != null && MeshSurfaceCount(mi.Mesh) > 0)
-			{
-				Mesh mesh = mi.Mesh;
-				racine.QueueFree();
-				_cacheMeshGazon = mesh;
-				GD.Print("Chunk_Client: grass.glb fallback OK — mesh depuis ", mi.Name);
-				return mesh;
-			}
+			Vector3 dirX = new Vector3(Mathf.Cos(angleY), 0, Mathf.Sin(angleY)) * (w / 2f);
+			Vector3 p0 = centre - dirX;
+			Vector3 p1 = centre + dirX;
+			Vector3 pTop = centre + new Vector3(0, h, 0);
+
+			// Normale biaisée vers le ciel (80% Up, 20% plan) : unifie l'éclairage avec le terrain, plus d'effet "X"
+			Vector3 normal = (Vector3.Up * 0.8f + new Vector3(-dirX.Z, 0, dirX.X).Normalized() * 0.2f).Normalized();
+
+			st.SetNormal(normal); st.SetUV(new Vector2(0, 1)); st.AddVertex(p0);
+			st.SetNormal(normal); st.SetUV(new Vector2(1, 1)); st.AddVertex(p1);
+			st.SetNormal(normal); st.SetUV(new Vector2(0.5f, 0)); st.AddVertex(pTop);
 		}
-		racine.QueueFree();
-		GD.PrintErr("Chunk_Client: grass.glb sans MeshInstance3D valide. Fallback Buisson_Plein.");
-		_cacheMeshGazon = ChargerMeshFlore("res://Modeles/Botanique/Buisson_Plein.glb");
-		return _cacheMeshGazon;
+
+		CreerLame(Vector3.Zero, 0f);
+		CreerLame(Vector3.Zero, Mathf.Pi / 3f);
+		CreerLame(Vector3.Zero, 2f * Mathf.Pi / 3f);
+
+		st.GenerateTangents();
+		return st.Commit();
 	}
 
 	private static IEnumerable<Node> ObtenirTousLesNoeuds(Node n)
@@ -1285,10 +1293,140 @@ public partial class Chunk_Client : Node3D
 		data.TailleChunk = donnees.TailleChunk;
 		data.HauteurMax = donnees.HauteurMax;
 
+		// Génération flore à la création du chunk : surface = voxel solide avec vide au-dessus (gazon partout où c'est possible)
+		data.InventaireFlore = GenererInventaireFloreDepuisSurface(data);
+
 		var payloads = new List<SectionPayload>(NB_SECTIONS);
 		for (int i = 0; i < NB_SECTIONS; i++)
 			payloads.Add(ConstruireSectionPayloadEnBackgroundFromData(data, i, baseX, baseZ));
 		return payloads;
+	}
+
+	/// <summary>Crée le nœud MultiMeshInstance3D de gazon pour un ChunkData (architecture AAA). À ajouter au monde et à libérer dans data.LibérerRids.</summary>
+	public static MultiMeshInstance3D CreerNoeudGazonPourChunkData(ChunkData data, Vector3 positionObservation, int tailleChunk)
+	{
+		var instances = ConstruireGazonInstancesPourChunkData(data, positionObservation);
+		if (instances == null || instances.Count == 0) return null;
+		if (_cacheMeshGazon == null) _cacheMeshGazon = GenererMeshGazonProcedural();
+		Mesh meshGazon = _cacheMeshGazon;
+		if (meshGazon == null) return null;
+		var mm = CreerMultiMeshGazon(instances, meshGazon);
+		var node = new MultiMeshInstance3D { Name = "Gazon" };
+		node.Multimesh = mm;
+		node.MaterialOverride = ObtenirMaterielGazonSymbiotique();
+		node.Position = new Vector3(data.Coordonnees.X * tailleChunk, 0, data.Coordonnees.Y * tailleChunk);
+		node.Visible = true;
+		return node;
+	}
+
+	/// <summary>Met à jour le MultiMesh du nœud gazon quand la flore a été purgée côté serveur (minage, gravité, fauchage). Les brins disparaissent visuellement.</summary>
+	public static void MettreAJourGazonPourChunkData(ChunkData data, Vector3 positionObservation, MultiMeshInstance3D nodeGazon)
+	{
+		if (data == null || nodeGazon == null) return;
+		var instances = ConstruireGazonInstancesPourChunkData(data, positionObservation);
+		if (_cacheMeshGazon == null) _cacheMeshGazon = GenererMeshGazonProcedural();
+		Mesh meshGazon = _cacheMeshGazon;
+		if (meshGazon == null) return;
+		nodeGazon.Multimesh = instances.Count == 0 ? null : CreerMultiMeshGazon(instances, meshGazon);
+	}
+
+	private static MultiMesh CreerMultiMeshGazon(List<(Transform3D t, Color c)> instances, Mesh meshGazon)
+	{
+		var mm = new MultiMesh();
+		mm.TransformFormat = MultiMesh.TransformFormatEnum.Transform3D;
+		mm.UseColors = true;
+		mm.Mesh = meshGazon;
+		mm.InstanceCount = instances.Count;
+		for (int i = 0; i < instances.Count; i++)
+		{
+			mm.SetInstanceTransform(i, instances[i].t);
+			mm.SetInstanceColor(i, instances[i].c);
+		}
+		return mm;
+	}
+
+	/// <summary>Construit la liste (transform, couleur) pour le gazon d'un ChunkData. Tout le gazon du chunk est ajouté dès l'intégration (pas de filtre distance).</summary>
+	public static List<(Transform3D t, Color c)> ConstruireGazonInstancesPourChunkData(ChunkData data, Vector3 positionObservation)
+	{
+		var liste = new List<(Transform3D t, Color c)>();
+		if (data?.InventaireFlore == null || data.InventaireFlore.Count == 0) return liste;
+		float originX = data.Coordonnees.X * (float)data.TailleChunk;
+		float originZ = data.Coordonnees.Y * (float)data.TailleChunk;
+		Vector3 chunkOrigin = new Vector3(originX, 0, originZ);
+		foreach (var kv in data.InventaireFlore)
+		{
+			if (kv.Value != 0) continue; // gazon uniquement
+			Vector3 positionLocale = new Vector3(kv.Key.X, kv.Key.Y + 0.5f, kv.Key.Z) - chunkOrigin + new Vector3(0.5f, 0f, 0.5f);
+			Color couleurSol = ObtenirCouleurTerrainDepuisChunkData(data, kv.Key.X, kv.Key.Y, kv.Key.Z);
+			Color couleurHerbe = new Color(couleurSol.R * 0.8f, couleurSol.G * 0.8f, couleurSol.B * 0.8f, 1f).Lerp(new Color(0.7f, 0.8f, 1f), 0.1f);
+			uint hashBase = (uint)(kv.Key.X * 73856093) ^ (uint)(kv.Key.Z * 19349663);
+			int densiteGazon = 14;
+			for (int i = 0; i < densiteGazon; i++)
+			{
+				uint h_brin = hashBase ^ (uint)(i * 83492791);
+				float offsetX = ((h_brin % 100) / 100f) - 0.5f;
+				float offsetZ = (((h_brin / 100) % 100) / 100f) - 0.5f;
+				float echelleAlea = 0.5f + ((h_brin % 50) / 100f);
+				float angleBrin = (h_brin % 360) * Mathf.Pi / 180f;
+				var t = Transform3D.Identity;
+				t.Origin = positionLocale + new Vector3(offsetX, 0, offsetZ);
+				t.Basis = Basis.Identity.Scaled(new Vector3(EchelleGazon * echelleAlea, EchelleGazon * echelleAlea, EchelleGazon * echelleAlea)).Rotated(Vector3.Up, angleBrin);
+				liste.Add((t, couleurHerbe));
+			}
+		}
+		return liste;
+	}
+
+	private static Color ObtenirCouleurTerrainDepuisChunkData(ChunkData data, int xGlobal, int yGlobal, int zGlobal)
+	{
+		if (data?.MaterialsFlat == null || data.NoiseTemperature == null || data.NoiseHumidite == null) return new Color(0.5f, 0.6f, 0.5f);
+		int lx = xGlobal - data.Coordonnees.X * data.TailleChunk;
+		int lz = zGlobal - data.Coordonnees.Y * data.TailleChunk;
+		if (lx < 0 || lx > data.TailleChunk || yGlobal < 0 || yGlobal > data.HauteurMax || lz < 0 || lz > data.TailleChunk)
+			return new Color(0.5f, 0.6f, 0.5f);
+		float temp = data.NoiseTemperature.GetNoise2D(xGlobal, zGlobal);
+		float hum = data.NoiseHumidite.GetNoise2D(xGlobal, zGlobal);
+		float facteurHum = Mathf.Clamp((hum + 1f) * 0.5f, 0f, 1f);
+		Color sec = new Color(1.3f, 0.9f, 0.35f);
+		Color normal = new Color(0.45f, 0.75f, 0.4f);
+		Color humide = new Color(0.25f, 0.55f, 0.3f);
+		return facteurHum < 0.35f ? sec.Lerp(normal, facteurHum / 0.35f) : normal.Lerp(humide, (facteurHum - 0.35f) / 0.65f);
+	}
+
+	/// <summary>Génère l'inventaire flore (gazon) à partir de la surface du chunk. Appelé au chargement pour afficher l'herbe.</summary>
+	private static Dictionary<Vector3I, byte> GenererInventaireFloreDepuisSurface(ChunkData data)
+	{
+		var inv = new Dictionary<Vector3I, byte>();
+		if (data?.DensitiesFlat == null || data.MaterialsFlat == null || data.TailleChunk <= 0 || data.HauteurMax <= 0) return inv;
+		const float isolevel = 0.0f;
+		int tc = data.TailleChunk;
+		int ox = data.Coordonnees.X * tc;
+		int oz = data.Coordonnees.Y * tc;
+		for (int lx = 0; lx < tc; lx++)
+			for (int lz = 0; lz < tc; lz++)
+			{
+				int ySurface = -1;
+				for (int y = data.HauteurMax - 1; y >= 0; y--)
+				{
+					float d = data.DensitiesFlat[data.Idx(lx, y, lz)];
+					if (d <= isolevel) continue;
+					bool videAuDessus = y + 1 > data.HauteurMax || data.DensitiesFlat[data.Idx(lx, y + 1, lz)] <= isolevel;
+					if (videAuDessus) { ySurface = y; break; }
+				}
+				if (ySurface < 2) continue;
+				byte mat = data.MaterialsFlat[data.Idx(lx, ySurface, lz)];
+				if (mat != 1) continue; // gazon uniquement sur terre (id 1)
+				float dy = data.DensitiesFlat[data.Idx(lx, Math.Min(ySurface + 1, data.HauteurMax), lz)] - data.DensitiesFlat[data.Idx(lx, Math.Max(0, ySurface - 1), lz)];
+				float dx = data.DensitiesFlat[data.Idx(Math.Min(lx + 1, tc), ySurface, lz)] - data.DensitiesFlat[data.Idx(Math.Max(0, lx - 1), ySurface, lz)];
+				float dz = data.DensitiesFlat[data.Idx(lx, ySurface, Math.Min(lz + 1, tc))] - data.DensitiesFlat[data.Idx(lx, ySurface, Math.Max(0, lz - 1))];
+				Vector3 grad = new Vector3(dx, dy, dz);
+				if (grad.LengthSquared() < 0.0001f) continue;
+				Vector3 normal = (-grad).Normalized();
+				if (normal.Y < 0.75f) continue; // seulement si la surface est plate (pas de brin en angle)
+				var posGlobale = new Vector3I(ox + lx, ySurface, oz + lz);
+				inv[posGlobale] = 0; // gazon
+			}
+		return inv;
 	}
 
 	/// <summary>Reconstruit les 45 SectionPayload à partir d'un ChunkData déjà rempli (minage/pose). Pour mise à jour visuelle après AppliquerVoxel.</summary>

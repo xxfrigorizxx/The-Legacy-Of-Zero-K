@@ -486,7 +486,16 @@ public partial class Chunk_Serveur : RefCounted
 			}
 		}
 		if (floreMorte.Count == 0) return;
-		foreach (var mort in floreMorte) InventaireFlore.Remove(mort);
+		foreach (var mort in floreMorte)
+		{
+			if (InventaireFlore.TryGetValue(mort, out byte typeFlore))
+			{
+				Vector3 posSpawn = new Vector3(mort.X + 0.5f, mort.Y + 0.5f, mort.Z + 0.5f);
+				byte idItem = typeFlore == 0 ? (byte)15 : (byte)(typeFlore == 1 ? ID_ITEM_BUISSON_PLEIN : ID_ITEM_BUISSON_VIDE);
+				_callbackBlocChutant?.Invoke(posSpawn, idItem);
+			}
+			InventaireFlore.Remove(mort);
+		}
 		_onFlorePurgée?.Invoke(new Vector2I(ChunkOffsetX, ChunkOffsetZ), new Dictionary<Vector3I, byte>(InventaireFlore));
 	}
 
@@ -534,13 +543,10 @@ public partial class Chunk_Serveur : RefCounted
 		foreach (var kv in floreDetruite)
 		{
 			InventaireFlore.Remove(kv.Key);
-			// Gazon (0) : disparaît seulement, pas d'entité. Buissons (1,2) : spawn BlocChutant.
-			if (kv.Value == 1 || kv.Value == 2)
-			{
-				Vector3 posSpawn = new Vector3(kv.Key.X + 0.5f, kv.Key.Y + 0.5f, kv.Key.Z + 0.5f);
-				byte idItem = (byte)(kv.Value == 1 ? ID_ITEM_BUISSON_PLEIN : ID_ITEM_BUISSON_VIDE);
-				_callbackBlocChutant?.Invoke(posSpawn, idItem);
-			}
+			Vector3 posSpawn = new Vector3(kv.Key.X + 0.5f, kv.Key.Y + 0.5f, kv.Key.Z + 0.5f);
+			// Gazon (0) lâche la Fibre (15). Buissons (1,2) : 10, 11.
+			byte idItem = kv.Value == 0 ? (byte)15 : (byte)(kv.Value == 1 ? ID_ITEM_BUISSON_PLEIN : ID_ITEM_BUISSON_VIDE);
+			_callbackBlocChutant?.Invoke(posSpawn, idItem);
 		}
 		if (floreDetruite.Count > 0)
 			_onFlorePurgée?.Invoke(new Vector2I(ChunkOffsetX, ChunkOffsetZ), new Dictionary<Vector3I, byte>(InventaireFlore));
@@ -783,5 +789,28 @@ public partial class Chunk_Serveur : RefCounted
 			}
 		}
 		AuditerGraviteFlore();
+	}
+
+	public void FaucherFlore(Vector3 pointImpactGlobal, float rayon)
+	{
+		float rayon2 = rayon * rayon;
+		var floreDetruite = new List<KeyValuePair<Vector3I, byte>>();
+
+		foreach (var kv in InventaireFlore)
+		{
+			Vector3 posFlore = new Vector3(kv.Key.X + 0.5f, kv.Key.Y + 0.5f, kv.Key.Z + 0.5f);
+			if (posFlore.DistanceSquaredTo(pointImpactGlobal) <= rayon2)
+				floreDetruite.Add(kv);
+		}
+		if (floreDetruite.Count == 0) return;
+
+		foreach (var kv in floreDetruite)
+		{
+			InventaireFlore.Remove(kv.Key);
+			Vector3 posSpawn = new Vector3(kv.Key.X + 0.5f, kv.Key.Y + 0.5f, kv.Key.Z + 0.5f);
+			byte idItem = kv.Value == 0 ? (byte)15 : (byte)(kv.Value == 1 ? ID_ITEM_BUISSON_PLEIN : ID_ITEM_BUISSON_VIDE);
+			_callbackBlocChutant?.Invoke(posSpawn, idItem);
+		}
+		_onFlorePurgée?.Invoke(new Vector2I(ChunkOffsetX, ChunkOffsetZ), new Dictionary<Vector3I, byte>(InventaireFlore));
 	}
 }

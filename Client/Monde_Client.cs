@@ -144,6 +144,19 @@ public partial class Monde_Client : Node3D
 		data.PhysicsShapeRID = shapeRid;
 		data._meshRef = mergedMesh;
 		data._shapeRef = shape;
+
+		// Gazon à la création du chunk : flore générée dans RemplirEtConstruirePayloads
+		if (data.InventaireFlore != null && data.InventaireFlore.Count > 0)
+		{
+			Vector3 posObs = ObtenirPositionObservation();
+			var nodeGazon = Chunk_Client.CreerNoeudGazonPourChunkData(data, posObs, TailleChunk);
+			if (nodeGazon != null)
+			{
+				AddChild(nodeGazon);
+				data._nodeGazon = nodeGazon;
+			}
+		}
+
 		// Mise en file de solidification : BodySetSpace sera appelé dans _PhysicsProcess (1 chunk/frame).
 		if (!data.EstEnFileSolidification)
 		{
@@ -469,10 +482,13 @@ public partial class Monde_Client : Node3D
 		_demanderCreation?.Invoke(pointImpact, normale, rayon, idMatiere);
 	}
 
-	/// <summary>Mise à jour flore seule — AAA : ChunkData n'a pas de flore (MultiMesh). No-op.</summary>
+	/// <summary>Mise à jour flore : le serveur a purgé du gazon (minage, gravité, fauchage). On met à jour l'inventaire et le rendu gazon pour que les brins disparaissent.</summary>
 	public void RecevoirFloreModifie(Vector2I coordChunk, Dictionary<Vector3I, byte> inventaireFlore)
 	{
-		// ChunkData ne gère pas la flore (pas de Node MultiMesh).
+		if (!_chunksData.TryGetValue(coordChunk, out var data)) return;
+		data.InventaireFlore = inventaireFlore ?? new Dictionary<Vector3I, byte>();
+		if (data._nodeGazon is MultiMeshInstance3D nodeGazon)
+			Chunk_Client.MettreAJourGazonPourChunkData(data, ObtenirPositionObservation(), nodeGazon);
 	}
 
 	public void RecevoirChunkModifie(Vector2I coordChunk, List<int> sectionsAffectees)

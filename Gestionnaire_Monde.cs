@@ -540,6 +540,12 @@ public partial class Gestionnaire_Monde : Node3D
 		}
 	}
 
+	public void AppliquerFauchageGlobal(Vector3 pointImpact, float rayon)
+	{
+		if (UseArchitectureReseau)
+			_mondeServeur?.AppliquerFauchageGlobal(pointImpact, rayon);
+	}
+
 	/// <summary>Oracle géologique : lecture directe de l'ADN (_materials) depuis le Serveur. Évite la dissonance visuelle (mine terre → reçoit pierre).</summary>
 	public int ObtenirMatiereExacte(Vector3 positionGlobale)
 	{

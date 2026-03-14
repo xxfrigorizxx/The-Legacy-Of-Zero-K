@@ -1,5 +1,6 @@
 using Godot;
 using System;
+using System.Collections.Generic;
 
 /// <summary>Chunk au format Data-Oriented (AAA) : données nues + RIDs RenderingServer/PhysicsServer3D. Aucun Node.</summary>
 public class ChunkData
@@ -24,6 +25,8 @@ public class ChunkData
 	internal Shape3D _shapeRef;
 	/// <summary>Référence au mesh eau fusionné (évite GC).</summary>
 	internal ArrayMesh _meshEauRef;
+	/// <summary>Nœud gazon (MultiMeshInstance3D) créé à l'intégration du chunk. Libéré dans LibérerRids.</summary>
+	internal Node _nodeGazon;
 
 	/// <summary>Données voxel (tableaux plats). Remplis par ExecuterCalculChunk.</summary>
 	public float[] DensitiesFlat { get; set; }
@@ -40,6 +43,8 @@ public class ChunkData
 	/// <summary>Bruit climat (une seule instance par chunk, réutilisée pour tous les voxels).</summary>
 	public FastNoiseLite NoiseTemperature { get; set; }
 	public FastNoiseLite NoiseHumidite { get; set; }
+	/// <summary>Flore générée à partir de la surface du chunk (gazon + buissons). Rempli au chargement.</summary>
+	public Dictionary<Vector3I, byte> InventaireFlore { get; set; }
 
 	public void ConfigurerBruitClimat(int seed)
 	{
@@ -119,5 +124,10 @@ public class ChunkData
 		_meshRef = null;
 		_shapeRef = null;
 		_meshEauRef = null;
+		if (_nodeGazon != null)
+		{
+			_nodeGazon.QueueFree();
+			_nodeGazon = null;
+		}
 	}
 }
